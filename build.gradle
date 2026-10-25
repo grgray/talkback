@@ -52,6 +52,7 @@ android {
     packagingOptions {
         exclude 'LICENSE'
         exclude 'README'
+        pickFirst 'lib/**/liblouis.so'
     }
     lintOptions {
         checkReleaseBuilds false

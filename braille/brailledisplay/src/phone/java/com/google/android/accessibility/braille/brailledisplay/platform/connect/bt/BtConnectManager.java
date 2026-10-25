@@ -40,6 +40,8 @@ import com.google.android.accessibility.braille.brailledisplay.platform.connect.
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.D2dConnection;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableBluetoothDevice;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
+import com.google.android.accessibility.braille.brailledisplay.platform.connect.dotpad.DotPadConnector;
+import com.google.android.accessibility.braille.brailledisplay.platform.connect.dotpad.DotPadDriver;
 import com.google.android.accessibility.braille.brailledisplay.platform.lib.Utils;
 import com.google.android.accessibility.utils.BuildVersionUtils;
 import com.google.android.accessibility.utils.SettingsUtils;
@@ -69,6 +71,7 @@ public class BtConnectManager extends ConnectManager {
   private final BtConnectStateReceiver btBondedReceiver;
   private final BtOnOffReceiver btOnOffReceiver;
   private final BtScanReceiver btScanReceiver;
+  private final DotPadDriver dotPadDriver;
   private boolean isInitialScanCycle = true;
   private Connector btConnector;
   private D2dConnection deviceConnection;
@@ -83,6 +86,7 @@ public class BtConnectManager extends ConnectManager {
     btScanReceiver = new BtScanReceiver(context, btScanReceiverCallback);
     btAdapter =
         ((BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE)).getAdapter();
+    dotPadDriver = DotPadDriver.getInstance(context);
     mainHandler = new MainHandler();
   }
 
@@ -133,6 +137,11 @@ public class BtConnectManager extends ConnectManager {
     disconnect();
     // Cancel discovery because it otherwise slows down the connection.
     BluetoothAdapter.getDefaultAdapter().cancelDiscovery();
+    dotPadDriver.stopBleScan();
+    if (DotPadDriver.isDotPadDevice(device)) {
+      internalConnect(device);
+      return;
+    }
     BluetoothDevice bluetoothDevice = ((ConnectableBluetoothDevice) device).bluetoothDevice();
     boolean result = bluetoothDevice.createBond();
     BrailleDisplayLog.d(TAG, "createBond: " + result);
@@ -245,6 +254,7 @@ public class BtConnectManager extends ConnectManager {
   public void stopSearch(Reason reason) {
     BrailleDisplayLog.d(TAG, "stopScan " + reason);
     mainHandler.cancelStopCheck();
+    dotPadDriver.stopBleScan();
     if (btAdapter != null && mayScan()) {
       btAdapter.cancelDiscovery();
     }
@@ -269,6 +279,7 @@ public class BtConnectManager extends ConnectManager {
     if (shouldStartScan && btAdapter != null && mayScan()) {
       isInitialScanCycle = true;
       mainHandler.scheduleStopChecks();
+      dotPadDriver.startBleScan(btScanReceiverCallback::onDeviceSeen);
       if (!btAdapter.startDiscovery()) {
         BrailleDisplayLog.e(TAG, "startScanPossibly failed to start discovery");
         stopSearch(Reason.STOP_DISCOVERY_FAILED);
@@ -305,7 +316,11 @@ public class BtConnectManager extends ConnectManager {
   }
 
   private void internalConnect(ConnectableDevice device) {
-    if (BuildVersionUtils.isAtLeastV() && useHid(context, device)) {
+    if (DotPadDriver.isDotPadDevice(device)) {
+      BrailleDisplayLog.i(TAG, "Connecting to DotPad BLE device.");
+      connectManagerCallback.onConnectStarted(/* initial= */ true, ConnectStage.RFCOMM);
+      btConnector = new DotPadConnector(context, device, new BtRfCommConnectorCallback());
+    } else if (BuildVersionUtils.isAtLeastV() && useHid(context, device)) {
       BrailleDisplayLog.i(TAG, "Braille HID is supported.");
       connectManagerCallback.onConnectStarted(/* initial= */ true, ConnectStage.HID);
       // Try HID protocol first, if it fails, fallback to RFCOMM.
@@ -343,6 +358,7 @@ public class BtConnectManager extends ConnectManager {
     public void handleMessage(Message msg) {
       if (msg.what == MSG_STOP) {
         BrailleDisplayLog.v(TAG, "invoke stopDiscovery from handler");
+        dotPadDriver.stopBleScan();
         if (btAdapter != null && mayScan()) {
           btAdapter.cancelDiscovery();
         }

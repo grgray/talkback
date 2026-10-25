@@ -25,6 +25,7 @@ import com.google.android.accessibility.braille.brltty.device.SupportedDeviceBmO
 import com.google.android.accessibility.braille.brltty.device.SupportedDeviceBmOrbit;
 import com.google.android.accessibility.braille.brltty.device.SupportedDeviceBmVarioConnect;
 import com.google.android.accessibility.braille.brltty.device.SupportedDeviceBmVarioUltra;
+import com.google.android.accessibility.braille.brltty.device.SupportedDeviceDotPad;
 import com.google.android.accessibility.braille.brltty.device.SupportedDeviceEu;
 import com.google.android.accessibility.braille.brltty.device.SupportedDeviceFs;
 import com.google.android.accessibility.braille.brltty.device.SupportedDeviceHid;
@@ -60,6 +61,7 @@ public class SupportedDevicesHelper {
           new SupportedDeviceSk(),
           new SupportedDeviceSkDisplay(),
           new SupportedDeviceMm(),
+          new SupportedDeviceDotPad(),
           new SupportedDeviceHid());
   private static final String HID_STUB_DEVICE_NAME = "HID";
 

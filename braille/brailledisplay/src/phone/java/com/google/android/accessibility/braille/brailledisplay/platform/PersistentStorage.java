@@ -23,6 +23,7 @@ import android.content.SharedPreferences;
 import android.text.TextUtils;
 import android.util.Pair;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
+import com.google.android.accessibility.braille.brailledisplay.platform.connect.dotpad.DotPadDriver;
 import com.google.android.accessibility.braille.brailledisplay.platform.lib.SharedPreferencesStringList;
 import com.google.android.accessibility.utils.SharedPreferencesUtils;
 import com.google.common.collect.ImmutableSet;
@@ -108,6 +109,11 @@ public final class PersistentStorage {
   public static void syncRememberedDevice(Context context, Set<ConnectableDevice> bondedDevices) {
     List<Pair<String, String>> rememberedDeviceInfos = getRememberedDevices(context);
     for (Pair<String, String> pair : rememberedDeviceInfos) {
+      if (DotPadDriver.isDotPadDeviceName(pair.first)) {
+        // DotPad connects over BLE GATT without classic Bluetooth bonding; preserve its
+        // remembered entry so it remains in the saved devices list and can auto-connect when seen.
+        continue;
+      }
       ImmutableSet<ConnectableDevice> filteredBondedDevice =
           bondedDevices.stream()
               .filter(device -> device.address().equals(pair.second))

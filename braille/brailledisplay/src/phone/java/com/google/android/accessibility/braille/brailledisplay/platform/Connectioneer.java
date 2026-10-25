@@ -37,6 +37,7 @@ import com.google.android.accessibility.braille.brailledisplay.platform.connect.
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.ConnectManagerProxy;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.D2dConnection;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
+import com.google.android.accessibility.braille.brailledisplay.platform.connect.dotpad.DotPadDriver;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.usb.UsbAttachedReceiver;
 import com.google.android.accessibility.braille.brailledisplay.platform.lib.SetupWizardFinishReceiver;
 import com.google.android.accessibility.braille.brltty.BrailleDisplayProperties;
@@ -104,7 +105,9 @@ public class Connectioneer {
   private final SetupWizardFinishReceiver setupWizardFinishReceiver;
   private final ConnectManagerProxy connectManagerProxy;
   private final ConnectManagerCallback connectManagerCallback;
+  private final DotPadDriver dotPadDriver;
   private Encoder encoder;
+  private Encoder activeEncoder;
   private BrailleDisplayProperties displayProperties;
   private boolean controllingServiceEnabled;
   // Store if user connects to a braille display via usb during SetupWizard.
@@ -113,6 +116,7 @@ public class Connectioneer {
 
   private Connectioneer(Context context) {
     this.context = context.getApplicationContext();
+    this.dotPadDriver = DotPadDriver.getInstance(this.context);
     encoder =
         ENCODER_FACTORY.createEncoder(
             this.context,
@@ -129,6 +133,7 @@ public class Connectioneer {
                 aspectTraffic.notifyReadDelay(delayMs);
               }
             });
+    activeEncoder = encoder;
     screenOnOffReceiver = new ScreenOnOffReceiver(this.context, screenOnOffReceiverCallback);
     usbAttachedReceiver = new UsbAttachedReceiver(this.context, usbAttachedReceiverCallback);
     setupWizardFinishReceiver =
@@ -235,6 +240,24 @@ public class Connectioneer {
 
   private void autoConnectIfPossibleToBondedDevice(ConnectReason reason) {
     autoConnectIfPossible(getBondedDeviceSet(), reason);
+    // Also scan for BLE DotPad devices if a remembered DotPad exists and auto-connect is enabled.
+    if (isBrailleDisplayEnabled()
+        && PersistentStorage.isAutoConnect(context)
+        && aspectConnection.isBluetoothOn()
+        && aspectConnection.useBluetoothConnection()
+        && !isConnectingOrConnected()
+        && hasRememberedDotPadDevice()) {
+      connectManagerProxy.startSearch(Reason.START_STARTED);
+    }
+  }
+
+  private boolean hasRememberedDotPadDevice() {
+    return PersistentStorage.getRememberedDevices(context).stream()
+        .anyMatch(
+            pair ->
+                DotPadDriver.isDotPadDeviceName(pair.first)
+                    && !userDisconnectedDevices.contains(pair.second)
+                    && !userDeniedDevices.contains(pair.second));
   }
 
   @SuppressLint("DefaultLocale")
@@ -294,7 +317,8 @@ public class Connectioneer {
     if (name == null) {
       return false;
     }
-    return encoder.getDeviceNameFilter().test(name);
+    return encoder.getDeviceNameFilter().test(name)
+        || dotPadDriver.getDeviceNameFilter().test(name);
   }
 
   private boolean allowDeviceById(int vendorId, int prodId) {
@@ -590,24 +614,29 @@ public class Connectioneer {
     }
 
     public void consumePacketFromDevice(byte[] packet) {
-      connectioneer.encoder.consumePacketFromDevice(packet);
+      connectioneer.activeEncoder.consumePacketFromDevice(packet);
     }
 
     public void writeBrailleDots(byte[] brailleDotBytes) {
-      connectioneer.encoder.writeBrailleDots(brailleDotBytes);
+      connectioneer.activeEncoder.writeBrailleDots(brailleDotBytes);
     }
 
     public int readCommand() {
-      return connectioneer.encoder.readCommand();
+      return connectioneer.activeEncoder.readCommand();
     }
 
     public void stop() {
-      connectioneer.encoder.stop();
+      connectioneer.activeEncoder.stop();
     }
 
     public Optional<BrailleDisplayProperties> start(
         String deviceName, int vendorId, int prodId, boolean useHid, String parameters) {
-      return connectioneer.encoder.start(deviceName, vendorId, prodId, useHid, parameters);
+      if (DotPadDriver.isDotPadDeviceName(deviceName)) {
+        connectioneer.activeEncoder = connectioneer.dotPadDriver;
+      } else {
+        connectioneer.activeEncoder = connectioneer.encoder;
+      }
+      return connectioneer.activeEncoder.start(deviceName, vendorId, prodId, useHid, parameters);
     }
   }
 
@@ -838,5 +867,6 @@ public class Connectioneer {
   @VisibleForTesting
   public void testing_setEncoder(Encoder encoder) {
     this.encoder = encoder;
+    this.activeEncoder = encoder;
   }
 }
