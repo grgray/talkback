@@ -18,7 +18,23 @@
 
   <uses-feature android:name="android.hardware.usb.host" />
 
+  <!-- Lets an app borrow the braille display from TalkBack; see BrailleDisplayAccessContract. -->
+  <permission
+      android:name="com.google.android.accessibility.braille.permission.BRAILLE_DISPLAY_ACCESS"
+      android:label="@string/bd_access_permission_label"
+      android:description="@string/bd_access_permission_description"
+      android:protectionLevel="normal" />
+
   <application>
+
+    <service
+        android:name="com.google.android.accessibility.braille.brailledisplay.platform.access.BrailleDisplayAccessService"
+        android:exported="true"
+        android:permission="com.google.android.accessibility.braille.permission.BRAILLE_DISPLAY_ACCESS">
+      <intent-filter>
+        <action android:name="com.google.android.accessibility.braille.action.BRAILLE_DISPLAY_ACCESS" />
+      </intent-filter>
+    </service>
 
     <activity
         android:name="com.google.android.accessibility.braille.brailledisplay.settings.BrailleDisplaySettingsActivity"

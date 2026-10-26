@@ -818,6 +818,14 @@
 
   <!-- Connected via usb dialog -->
   <!-- Title of the dialog that notifies the user navigation commands are unavailable while editing. [CHAR_LIMIT=100] -->
+  <!-- Spoken when TalkBack lends the braille display to another app. [CHAR_LIMIT=NONE] -->
+  <string name="bd_access_lent">Braille display in use by <xliff:g id="app_name" example="Dot Pad Demo">%1$s</xliff:g></string>
+  <!-- Spoken when TalkBack takes the braille display back from another app. [CHAR_LIMIT=NONE] -->
+  <string name="bd_access_returned">Braille display returned to TalkBack</string>
+  <!-- Label of the permission that lets an app borrow the braille display from TalkBack. [CHAR_LIMIT=NONE] -->
+  <string name="bd_access_permission_label">use the braille display</string>
+  <!-- Description of the permission that lets an app borrow the braille display from TalkBack. [CHAR_LIMIT=NONE] -->
+  <string name="bd_access_permission_description">Allows the app to borrow the braille display from TalkBack while the app is in use.</string>
   <string name="bd_usb_connect_dialog_title">Braille display connected to USB</string>
   <!-- Message of the dialog that asks the user to confirm that they wish to turn off the braille display feature dialog. [CHAR_LIMIT=300] -->
   <string name="bd_usb_connect_dialog_message">Your %s\'s battery is charging your braille display.\n\nIf you need to switch to Bluetooth, disconnect your USB or USB hub and go to TalkBack settings > Braille display.</string>

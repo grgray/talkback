@@ -21,6 +21,7 @@ import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 import com.google.android.accessibility.braille.brailledisplay.controller.BdController;
 import com.google.android.accessibility.braille.brailledisplay.platform.BrailleDisplayManager;
+import com.google.android.accessibility.braille.brailledisplay.platform.access.BrailleDisplayLeaseManager;
 import com.google.android.accessibility.braille.common.BrailleCommonTalkBackSpeaker;
 import com.google.android.accessibility.braille.interfaces.BrailleDisplayForBrailleIme;
 import com.google.android.accessibility.braille.interfaces.BrailleDisplayForTalkBack;
@@ -64,6 +65,8 @@ public class BrailleDisplay implements BrailleDisplayForTalkBack, BrailleDisplay
     BrailleDisplayLog.d(TAG, "start");
     brailleDisplayManager.setAccessibilityServiceContextProvider(() -> accessibilityService);
     brailleDisplayManager.onServiceStarted();
+    BrailleDisplayLeaseManager.getInstance(accessibilityService)
+        .onServiceStarted(accessibilityService);
     isRunning = true;
   }
 
@@ -71,6 +74,7 @@ public class BrailleDisplay implements BrailleDisplayForTalkBack, BrailleDisplay
   @Override
   public void stop() {
     BrailleDisplayLog.d(TAG, "stop");
+    BrailleDisplayLeaseManager.getInstance(accessibilityService).onServiceStopped();
     brailleDisplayManager.onServiceStopped();
     brailleDisplayManager.setAccessibilityServiceContextProvider(() -> null);
     brailleDisplayManager = null;
@@ -81,6 +85,8 @@ public class BrailleDisplay implements BrailleDisplayForTalkBack, BrailleDisplay
   @Override
   public void onAccessibilityEvent(AccessibilityEvent accessibilityEvent) {
     if (isRunning) {
+      BrailleDisplayLeaseManager.getInstance(accessibilityService)
+          .onAccessibilityEvent(accessibilityEvent);
       brailleDisplayManager.onAccessibilityEvent(accessibilityEvent);
     }
   }

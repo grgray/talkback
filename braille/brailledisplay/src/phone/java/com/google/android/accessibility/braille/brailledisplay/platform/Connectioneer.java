@@ -37,6 +37,7 @@ import com.google.android.accessibility.braille.brailledisplay.platform.connect.
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.ConnectManagerProxy;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.D2dConnection;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
+import com.google.android.accessibility.braille.brailledisplay.platform.access.BrailleDisplayLeaseManager;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.dotpad.DotPadDriver;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.usb.UsbAttachedReceiver;
 import com.google.android.accessibility.braille.brailledisplay.platform.lib.SetupWizardFinishReceiver;
@@ -91,6 +92,7 @@ public class Connectioneer {
     AUTO_CONNECT_BONDED_REMEMBERED_SCREEN_ON,
     AUTO_CONNECT_USB_UNPLUGGED,
     AUTO_CONNECT_USB_PLUGGED,
+    AUTO_CONNECT_ACCESS_RETURNED,
   }
 
   public final AspectEnablement aspectEnablement = new AspectEnablement(this);
@@ -113,6 +115,8 @@ public class Connectioneer {
   // Store if user connects to a braille display via usb during SetupWizard.
   private boolean usbConnected;
   private boolean manualConnect;
+  /** True while a third-party app has borrowed the display; blocks automatic connections. */
+  private boolean lentToExternalApp;
 
   private Connectioneer(Context context) {
     this.context = context.getApplicationContext();
@@ -239,6 +243,9 @@ public class Connectioneer {
   }
 
   private void autoConnectIfPossibleToBondedDevice(ConnectReason reason) {
+    if (lentToExternalApp) {
+      return;
+    }
     autoConnectIfPossible(getBondedDeviceSet(), reason);
     // Also scan for BLE DotPad devices if a remembered DotPad exists and auto-connect is enabled.
     if (isBrailleDisplayEnabled()
@@ -335,7 +342,58 @@ public class Connectioneer {
     return connectManagerProxy.isConnectingOrConnected();
   }
 
+  /** The display TalkBack is connected or connecting to, if any. */
+  public Optional<ConnectableDevice> getConnectingOrConnectedDevice() {
+    return connectManagerProxy.getConnectingOrConnectedDevice();
+  }
+
+  /** True if TalkBack is connected to a display. */
+  public boolean isConnected() {
+    return connectManagerProxy.isConnected();
+  }
+
+  /**
+   * Disconnects from the braille display so a third-party app can use it, and stops automatic
+   * reconnection until {@link #reclaimDisplayFromExternalApp}. Returns the display that was
+   * connected or connecting, if any. See {@link BrailleDisplayLeaseManager}.
+   */
+  public Optional<ConnectableDevice> releaseDisplayForExternalApp() {
+    lentToExternalApp = true;
+    Optional<ConnectableDevice> device = connectManagerProxy.getConnectingOrConnectedDevice();
+    BrailleDisplayLog.d(TAG, "releaseDisplayForExternalApp: " + device);
+    if (device.isPresent()) {
+      connectManagerProxy.disconnect();
+    }
+    return device;
+  }
+
+  /**
+   * Ends a {@link #releaseDisplayForExternalApp} and reconnects to {@code device}, or to a
+   * remembered display if it is null.
+   */
+  public void reclaimDisplayFromExternalApp(@Nullable ConnectableDevice device) {
+    lentToExternalApp = false;
+    BrailleDisplayLog.d(TAG, "reclaimDisplayFromExternalApp: " + device);
+    if (!isBrailleDisplayEnabled()) {
+      return;
+    }
+    if (device != null) {
+      submitConnectionRequest(device, ConnectReason.AUTO_CONNECT_ACCESS_RETURNED);
+    } else {
+      autoConnectIfPossibleToBondedDevice(ConnectReason.AUTO_CONNECT_ACCESS_RETURNED);
+    }
+  }
+
   private void submitConnectionRequest(ConnectableDevice device, ConnectReason reason) {
+    if (lentToExternalApp) {
+      if (reason != ConnectReason.USER_CHOSE_CONNECT_DEVICE) {
+        BrailleDisplayLog.d(TAG, "Display lent to an app; not connecting for " + reason);
+        return;
+      }
+      // The user explicitly asked TalkBack to connect: take the display back.
+      lentToExternalApp = false;
+      BrailleDisplayLeaseManager.getInstance(context).onUserReclaimedDisplay();
+    }
     BrailleDisplayLog.d(TAG, "submitConnectionRequest to " + device + ", reason:" + reason);
     manualConnect = reason == ConnectReason.USER_CHOSE_CONNECT_DEVICE;
     connectManagerProxy.connect(device);
