@@ -48,10 +48,11 @@ import java.util.function.Predicate;
  * {@link DotPadBleTransport}.
  *
  * <p>Reports a multi-line display to TalkBack (20 logical braille cells x 8 logical lines on the
- * Dot Pad X), renders each page onto the graphics area with {@link DotPadPageRenderer}, and writes
- * changed physical lines ({@code lineId = 1..10}) one at a time, waiting for the display to finish
- * moving its pins before sending the next. Newer pages replace older ones that have not been sent
- * yet, so the display never falls behind TalkBack.
+ * Dot Pad X), renders each page onto the graphics area with {@link DotPadPageRenderer}, and sends
+ * the smallest rectangle of changed cells across the changed physical lines ({@code lineId =
+ * 1..10}) as one partial display request ({@link DotPadPacket#REQ_DISPLAY_PARTIAL}), waiting for
+ * the display to finish moving its pins before sending the next. Newer pages replace older ones
+ * that have not been sent yet, so the display never falls behind TalkBack.
  *
  * <p>Connection state, writes and key decoding all run on the main thread. {@link Encoder} methods
  * may be called from TalkBack's display thread and hand their work to the main thread.
@@ -69,8 +70,8 @@ public class DotPadDriver implements Encoder {
   /** Added to the display's reported refresh time to allow for transport latency. */
   private static final long LINE_TIMEOUT_MARGIN_MS = 1_000L;
   private static final long DEFAULT_LINE_TIMEOUT_MS = 3_000L;
-  private static final long LINE_RETRY_DELAY_MS = 100L;
-  private static final int MAX_LINE_RETRIES = 3;
+  private static final long WRITE_RETRY_DELAY_MS = 100L;
+  private static final int MAX_WRITE_RETRIES = 3;
 
   /** A key chord and the TalkBack command it triggers. */
   private static final class KeyMapping {
@@ -156,7 +157,7 @@ public class DotPadDriver implements Encoder {
   private final DotPadKeyDecoder keyDecoder = new DotPadKeyDecoder();
   private final Queue<Integer> pendingCommands = new ConcurrentLinkedQueue<>();
   private final Runnable boardInfoTimeoutRunnable = this::onBoardInfoTimeout;
-  private final Runnable lineTimeoutRunnable = this::onLineTimeout;
+  private final Runnable lineTimeoutRunnable = this::onWriteTimeout;
   private final Runnable pumpRunnable = this::pumpLines;
 
   @Nullable private volatile D2dConnection.Callback trafficCallback;
@@ -174,9 +175,11 @@ public class DotPadDriver implements Encoder {
   @Nullable private byte[][] desiredLines;
   /** Physical cells the display is known to show on each line; a {@code null} line is unknown. */
   @Nullable private byte[][] displayedLines;
-  private int inFlightLine = -1;
-  @Nullable private byte[] inFlightCells;
-  private int lineRetries;
+  /** First line of the write in flight, or {@code -1} if none. */
+  private int inFlightFirstLine = -1;
+  /** Full desired contents of each line covered by the write in flight. */
+  @Nullable private byte[][] inFlightLines;
+  private int writeRetries;
 
   private DotPadDriver(Context appContext) {
     this.appContext = appContext;
@@ -230,9 +233,9 @@ public class DotPadDriver implements Encoder {
     parser.reset();
     keyDecoder.reset();
     pendingCommands.clear();
-    inFlightLine = -1;
-    inFlightCells = null;
-    lineRetries = 0;
+    inFlightFirstLine = -1;
+    inFlightLines = null;
+    writeRetries = 0;
     displayedLines = null;
     if (!keepPage) {
       boardInfo = null;
@@ -342,32 +345,77 @@ public class DotPadDriver implements Encoder {
     pumpLines();
   }
 
-  /** Sends the first line that differs from what the display shows, if nothing is in flight. */
+  /**
+   * Sends every cell that differs from what the display shows as one partial display request, if
+   * nothing is in flight. The request covers the rectangle from the first to the last changed line
+   * and from the leftmost to the rightmost changed cell.
+   */
   private void pumpLines() {
     mainHandler.removeCallbacks(pumpRunnable);
     byte[][] desired = desiredLines;
-    if (!displayReady || inFlightLine >= 0 || desired == null) {
+    if (!displayReady || inFlightFirstLine >= 0 || desired == null) {
       return;
     }
     if (displayedLines == null || displayedLines.length != desired.length) {
       displayedLines = new byte[desired.length][];
     }
+    int firstLine = -1;
+    int lastLine = -1;
+    int startCell = Integer.MAX_VALUE;
+    int endCell = -1;
     for (int line = 0; line < desired.length; line++) {
-      if (Arrays.equals(desired[line], displayedLines[line])) {
+      int[] range = changedRange(displayedLines[line], desired[line]);
+      if (range == null) {
         continue;
       }
-      inFlightLine = line;
-      inFlightCells = desired[line];
-      DotPadPacket packet =
-          DotPadPacket.displayLine(GRAPHIC_FIRST_LINE_ID + line, /* startCell= */ 0, inFlightCells);
-      BrailleDisplayLog.v(TAG, "Writing " + packet);
-      mainHandler.postDelayed(lineTimeoutRunnable, lineTimeoutMs());
-      if (!transport.write(packet.toBytes())) {
-        BrailleDisplayLog.w(TAG, "Transport not ready; dropping line write");
-        finishLine(/* displayed= */ false);
+      if (firstLine < 0) {
+        firstLine = line;
       }
+      lastLine = line;
+      startCell = Math.min(startCell, range[0]);
+      endCell = Math.max(endCell, range[1] + 1);
+    }
+    if (firstLine < 0) {
       return;
     }
+    inFlightFirstLine = firstLine;
+    inFlightLines = Arrays.copyOfRange(desired, firstLine, lastLine + 1);
+    DotPadPacket packet =
+        DotPadPacket.displayPartial(
+            GRAPHIC_FIRST_LINE_ID + firstLine, startCell, endCell, inFlightLines);
+    BrailleDisplayLog.v(TAG, "Writing " + packet);
+    mainHandler.postDelayed(lineTimeoutRunnable, lineTimeoutMs());
+    if (!transport.write(packet.toBytes())) {
+      BrailleDisplayLog.w(TAG, "Transport not ready; dropping write");
+      finishWrite(/* displayed= */ false);
+    }
+  }
+
+  /**
+   * Returns the first and last (inclusive) cell indices where {@code desired} differs from {@code
+   * displayed}, the whole line if {@code displayed} is unknown, or {@code null} if they match.
+   * Writing only this range lets the display move fewer pins.
+   */
+  @Nullable
+  static int[] changedRange(@Nullable byte[] displayed, byte[] desired) {
+    if (desired.length == 0) {
+      return null;
+    }
+    if (displayed == null || displayed.length != desired.length) {
+      return new int[] {0, desired.length - 1};
+    }
+    int first = 0;
+    while (first < desired.length && desired[first] == displayed[first]) {
+      first++;
+    }
+    if (first == desired.length) {
+      return null;
+    }
+    int last = desired.length - 1;
+    while (desired[last] == displayed[last]) {
+      last--;
+    }
+    return new int[] {first, last};
   }
 
   private long lineTimeoutMs() {
@@ -379,32 +427,35 @@ public class DotPadDriver implements Encoder {
   }
 
   /**
-   * Ends the in-flight line write. If {@code displayed}, the display now shows it; otherwise it is
-   * retried a few times before being assumed shown, so a misbehaving line cannot stall the page.
+   * Ends the write in flight. If {@code displayed}, the display now shows it; otherwise it is
+   * retried a few times before being assumed shown, so a misbehaving write cannot stall the page.
    */
-  private void finishLine(boolean displayed) {
+  private void finishWrite(boolean displayed) {
     mainHandler.removeCallbacks(lineTimeoutRunnable);
-    if (inFlightLine < 0) {
+    if (inFlightFirstLine < 0) {
       return;
     }
-    if (displayed || ++lineRetries > MAX_LINE_RETRIES) {
-      if (displayedLines != null && inFlightLine < displayedLines.length) {
-        displayedLines[inFlightLine] = inFlightCells;
+    if (displayed || ++writeRetries > MAX_WRITE_RETRIES) {
+      byte[][] lines = inFlightLines;
+      if (displayedLines != null && lines != null) {
+        for (int i = 0; i < lines.length && inFlightFirstLine + i < displayedLines.length; i++) {
+          displayedLines[inFlightFirstLine + i] = lines[i];
+        }
       }
-      lineRetries = 0;
-      inFlightLine = -1;
-      inFlightCells = null;
+      writeRetries = 0;
+      inFlightFirstLine = -1;
+      inFlightLines = null;
       pumpLines();
     } else {
-      inFlightLine = -1;
-      inFlightCells = null;
-      mainHandler.postDelayed(pumpRunnable, LINE_RETRY_DELAY_MS);
+      inFlightFirstLine = -1;
+      inFlightLines = null;
+      mainHandler.postDelayed(pumpRunnable, WRITE_RETRY_DELAY_MS);
     }
   }
 
-  private void onLineTimeout() {
-    BrailleDisplayLog.w(TAG, "No completion for line " + inFlightLine + "; moving on");
-    finishLine(/* displayed= */ false);
+  private void onWriteTimeout() {
+    BrailleDisplayLog.w(TAG, "No completion for write at line " + inFlightFirstLine + "; moving on");
+    finishWrite(/* displayed= */ false);
   }
 
   // ---- Incoming packets (main thread) ----
@@ -431,16 +482,18 @@ public class DotPadDriver implements Encoder {
             (command == DotPadPacket.RSP_DEVICE_NAME ? "Device name: " : "Firmware: ")
                 + new String(packet.getData(), StandardCharsets.US_ASCII).trim());
         break;
+      case DotPadPacket.RSP_DISPLAY_PARTIAL:
       case DotPadPacket.RSP_DISPLAY_LINE:
         int code = packet.getDataByte(0);
-        if (code != DotPadPacket.DISPLAY_ACK && isInFlight(packet)) {
-          BrailleDisplayLog.w(TAG, "Line " + packet.getDestination() + " rejected: " + code);
-          finishLine(/* displayed= */ false);
+        if (code != DotPadPacket.DISPLAY_ACK && inFlightFirstLine >= 0) {
+          BrailleDisplayLog.w(TAG, "Write at line " + packet.getDestination() + " rejected: " + code);
+          finishWrite(/* displayed= */ false);
         }
         break;
+      case DotPadPacket.NTF_DISPLAY_PARTIAL:
       case DotPadPacket.NTF_DISPLAY_LINE:
-        if (isInFlight(packet)) {
-          finishLine(/* displayed= */ true);
+        if (inFlightFirstLine >= 0) {
+          finishWrite(/* displayed= */ true);
         }
         break;
       case DotPadPacket.NTF_ERROR:
@@ -449,10 +502,6 @@ public class DotPadDriver implements Encoder {
       default:
         BrailleDisplayLog.v(TAG, "Unhandled " + packet);
     }
-  }
-
-  private boolean isInFlight(DotPadPacket packet) {
-    return inFlightLine >= 0 && packet.getDestination() == GRAPHIC_FIRST_LINE_ID + inFlightLine;
   }
 
   private void onBoardInfo(DotPadBoardInfo info) {

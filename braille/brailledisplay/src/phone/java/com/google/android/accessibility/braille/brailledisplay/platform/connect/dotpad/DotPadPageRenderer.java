@@ -26,7 +26,7 @@ package com.google.android.accessibility.braille.brailledisplay.platform.connect
  *
  * <p>Input cells use TalkBack's braille dot order (bit {@code n} = dot {@code n + 1}). Output cells
  * use the Dot Pad graphic-mode pin order, where bit {@code y + 4 * x} is the pin at column {@code
- * x}, row {@code y} of the physical cell.
+ * x}, row {@code y} of the physical cell; this is what {@link DotPadPacket#displayPartial} takes.
  */
 public final class DotPadPageRenderer {
   public static final int PINS_PER_CELL_X = 2;

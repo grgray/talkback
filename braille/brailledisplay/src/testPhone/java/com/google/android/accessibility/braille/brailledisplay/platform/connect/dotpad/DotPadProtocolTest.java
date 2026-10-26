@@ -65,6 +65,21 @@ public final class DotPadProtocolTest {
         encoded);
   }
 
+  @Test
+  public void displayPartial_packsRectangleRowByRow() {
+    byte[][] rows = {bytes(0, 1, 2, 3, 4), bytes(10, 11, 12, 13, 14)};
+    DotPadPacket packet = DotPadPacket.displayPartial(4, 1, 4, rows);
+    assertEquals(4, packet.getDestination());
+    assertEquals(DotPadPacket.REQ_DISPLAY_PARTIAL, packet.getCommand());
+    assertEquals(DotPadPacket.SEQ_GRAPHIC_MODE, packet.getSeq());
+    // [startCell, endCell (exclusive)] then cells 1..3 of each row.
+    assertArrayEquals(bytes(1, 4, 1, 2, 3, 11, 12, 13), packet.getData());
+    byte[] encoded = packet.toBytes();
+    assertEquals(0x02, encoded[5]);
+    assertEquals(0x20, encoded[6]);
+    assertEquals(8 + 5, ((encoded[2] & 0xFF) << 8) | (encoded[3] & 0xFF));
+  }
+
   // ---- DotPadPacketParser ----
 
   @Test
@@ -260,5 +275,25 @@ public final class DotPadProtocolTest {
     page[7 * 20] = (byte) 0x80; // Dot 8 of logical line 7 -> pin row 38 = row 9, y 2, x 1.
     byte[][] lines = DotPadPageRenderer.render(page, 20, 8, 30, 10);
     assertEquals(1 << (2 + 4), lines[9][0] & 0xFF);
+  }
+
+  // ---- DotPadDriver.changedRange ----
+
+  @Test
+  public void changedRange_unknownLineIsWholeLine() {
+    assertArrayEquals(new int[] {0, 29}, DotPadDriver.changedRange(null, new byte[30]));
+  }
+
+  @Test
+  public void changedRange_identicalLineIsNull() {
+    assertNull(DotPadDriver.changedRange(bytes(1, 2, 3), bytes(1, 2, 3)));
+  }
+
+  @Test
+  public void changedRange_spansFirstToLastDifference() {
+    assertArrayEquals(
+        new int[] {1, 3}, DotPadDriver.changedRange(bytes(0, 0, 0, 0, 0), bytes(0, 5, 0, 7, 0)));
+    assertArrayEquals(
+        new int[] {4, 4}, DotPadDriver.changedRange(bytes(0, 0, 0, 0, 0), bytes(0, 0, 0, 0, 9)));
   }
 }

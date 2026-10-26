@@ -46,6 +46,9 @@ public final class DotPadPacket {
   public static final int REQ_DISPLAY_LINE = 0x0200;
   public static final int RSP_DISPLAY_LINE = 0x0201;
   public static final int NTF_DISPLAY_LINE = 0x0202;
+  public static final int REQ_DISPLAY_PARTIAL = 0x0220;
+  public static final int RSP_DISPLAY_PARTIAL = 0x0221;
+  public static final int NTF_DISPLAY_PARTIAL = 0x0222;
   public static final int NTF_KEYS_SCROLL = 0x0302;
   public static final int NTF_KEYS_PERKINS = 0x0312;
   public static final int NTF_KEYS_ROUTING = 0x0322;
@@ -85,6 +88,24 @@ public final class DotPadPacket {
     data[0] = (byte) startCell;
     System.arraycopy(cells, 0, data, 1, cells.length);
     return new DotPadPacket(lineId, REQ_DISPLAY_LINE, SEQ_GRAPHIC_MODE, data);
+  }
+
+  /**
+   * Creates a partial display request that writes a rectangle of graphic-mode cells in one packet:
+   * cells {@code startCell} (inclusive) to {@code endCell} (exclusive) of each of {@code
+   * rows.length} consecutive lines starting at {@code firstLineId}. The display acknowledges with
+   * {@link #RSP_DISPLAY_PARTIAL} and reports completion with {@link #NTF_DISPLAY_PARTIAL}.
+   */
+  public static DotPadPacket displayPartial(
+      int firstLineId, int startCell, int endCell, byte[][] rows) {
+    int width = endCell - startCell;
+    byte[] data = new byte[2 + width * rows.length];
+    data[0] = (byte) startCell;
+    data[1] = (byte) endCell;
+    for (int i = 0; i < rows.length; i++) {
+      System.arraycopy(rows[i], startCell, data, 2 + i * width, width);
+    }
+    return new DotPadPacket(firstLineId, REQ_DISPLAY_PARTIAL, SEQ_GRAPHIC_MODE, data);
   }
 
   public int getDestination() {
