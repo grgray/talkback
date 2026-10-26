@@ -133,8 +133,9 @@ public class BdController implements Controller {
     translatorManager.start();
     talkBackForBrailleDisplay.switchInputMethodToBrailleKeyboard();
     this.displayer = displayer;
-    overlayDisplay.start(displayer.getDeviceProperties().getNumTextCells());
-    cellsContentManager.start(displayer.getDeviceProperties().getNumTextCells());
+    BrailleDisplayProperties props = displayer.getDeviceProperties();
+    overlayDisplay.start(props.getTotalTextCells());
+    cellsContentManager.start(props.getNumTextCells(), props.getNumTextRows());
     eventManager.onActivate();
     if (isBrailleKeyboardActivated()) {
       getBrailleImeForBrailleDisplay().onBrailleDisplayConnected();
@@ -686,7 +687,7 @@ public class BdController implements Controller {
     }
 
     public int getMaxDisplayCells() {
-      return displayer.getDeviceProperties().getNumTextCells();
+      return displayer.getDeviceProperties().getTotalTextCells();
     }
 
     public int getCurrentShowContentLength() {

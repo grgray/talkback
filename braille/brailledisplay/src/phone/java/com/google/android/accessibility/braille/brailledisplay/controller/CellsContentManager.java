@@ -127,19 +127,23 @@ public class CellsContentManager implements CellsContentConsumer {
   }
 
   public void start(int numTextCells) {
-    preferredWrapStrategy = new WordWrapStrategy(numTextCells);
-    editingWrapStrategy = new EditorWordWrapStrategy(numTextCells);
+    start(numTextCells, /* numTextRows= */ 1);
+  }
+
+  public void start(int numTextCells, int numTextRows) {
+    preferredWrapStrategy = new WordWrapStrategy(numTextCells, numTextRows);
+    editingWrapStrategy = new EditorWordWrapStrategy(numTextCells, numTextRows);
     commonDisplayInfoWrapper =
         new DisplayInfoWrapper(new ContentHelper(translatorManager, wrapStrategyRetriever));
     timedMessagePopupWrapper =
         new DisplayInfoWrapper(
-            new ContentHelper(translatorManager, new WordWrapStrategy(numTextCells)));
+            new ContentHelper(translatorManager, new WordWrapStrategy(numTextCells, numTextRows)));
     timedMessageAnnouncementWrapper =
         new DisplayInfoWrapper(
-            new ContentHelper(translatorManager, new WordWrapStrategy(numTextCells)));
+            new ContentHelper(translatorManager, new WordWrapStrategy(numTextCells, numTextRows)));
     timedMessageCaptionWrapper =
         new DisplayInfoWrapper(
-            new ContentHelper(translatorManager, new WordWrapStrategy(numTextCells)));
+            new ContentHelper(translatorManager, new WordWrapStrategy(numTextCells, numTextRows)));
     translatorManager.addOnOutputTablesChangedListener(outputCodeChangedListener);
     BrailleUserPreferences.getSharedPreferences(context, BRAILLE_SHARED_PREFS_FILENAME)
         .registerOnSharedPreferenceChangeListener(onSharedPreferenceChangeListener);

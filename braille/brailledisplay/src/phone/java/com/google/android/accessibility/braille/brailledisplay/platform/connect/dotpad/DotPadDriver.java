@@ -44,6 +44,7 @@ import com.google.android.accessibility.braille.brltty.DeviceInfo;
 import com.google.android.accessibility.braille.brltty.Encoder;
 import com.google.android.accessibility.braille.brltty.SupportedDevicesHelper;
 import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -60,21 +61,59 @@ import java.util.function.Predicate;
  * Pad (DotPad320X) via the Dot Pad Android SDK v3.0.1 ({@link DotPadScanner} and {@link
  * DotPadProcess}).
  *
- * <p>Phase 2: Connects through {@link DotPadScanner} / {@link DotPadProcess}, reports a 20-cell
- * braille display to TalkBack, sends TalkBack's dot patterns directly to the 20-cell braille line
- * ({@code lineId = 0}) via {@link DotPadProcess#displayLineData} while respecting write
- * acknowledgements, and maps Dot Pad keys to TalkBack commands.
+ * <p>Phase 3: Connects through {@link DotPadScanner} / {@link DotPadProcess}, reports a 160-cell
+ * multi-line braille display (20 logical braille cells per line x 8 logical lines) to TalkBack,
+ * renders each logical 2x4 braille cell onto the Dot Pad's 60x40 physical pin grid (30x10 physical
+ * 2x4 cells, {@code lineId = 1..10}) with a 1-dot horizontal gap between adjacent cells and a
+ * 1-dot vertical gap between adjacent lines, and sends changed physical rows via {@link
+ * DotPadProcess#displayLineData} using {@link DisplayMode#TextMode} while respecting write
+ * acknowledgements.
  */
 public class DotPadDriver implements Encoder {
   private static final String TAG = "DotPadDriver";
   public static final String DRIVER_CODE = "dotpad";
   public static final String DEVICE_NAME_PREFIX = "DotPad";
+  /** Number of cells on the dedicated single-line braille bar ({@code lineId = 0}). */
+  public static final int NUM_BRAILLE_LINE_CELLS = 20;
+  /**
+   * Number of logical braille cells per row on the graphics area (20 cells x 3 pin columns = 60
+   * pin columns across 30 physical cells).
+   */
   public static final int NUM_TEXT_CELLS = 20;
+  /**
+   * Number of logical braille rows on the graphics area (8 rows x 5 pin rows = 40 pin rows across
+   * 10 physical lines).
+   */
+  public static final int NUM_TEXT_ROWS = 8;
   public static final int NUM_STATUS_CELLS = 0;
-  private static final int BRAILLE_LINE_ID = 0;
+  private static final int PHYSICAL_GRAPHIC_COLUMNS = 30;
+  private static final int PHYSICAL_GRAPHIC_ROWS = 10;
+  private static final int PINS_PER_PHYSICAL_CELL_COL = 2;
+  private static final int PINS_PER_PHYSICAL_CELL_ROW = 4;
+  private static final int LOGICAL_CELL_WIDTH_PINS = 2;
+  private static final int LOGICAL_CELL_HEIGHT_PINS = 4;
+  private static final int LOGICAL_CELL_HORIZONTAL_GAP_PINS = 1;
+  private static final int LOGICAL_CELL_VERTICAL_GAP_PINS = 1;
+  private static final int LOGICAL_CELL_STRIDE_X =
+      LOGICAL_CELL_WIDTH_PINS + LOGICAL_CELL_HORIZONTAL_GAP_PINS; // 3 pins
+  private static final int LOGICAL_CELL_STRIDE_Y =
+      LOGICAL_CELL_HEIGHT_PINS + LOGICAL_CELL_VERTICAL_GAP_PINS; // 5 pins
+  private static final int GRAPHIC_FIRST_LINE_ID = 1;
   private static final int START_CELL_INDEX = 0;
   private static final long WRITE_ACK_POLL_INTERVAL_MS = 20L;
   private static final long WRITE_ACK_TIMEOUT_MS = 1000L;
+
+  /**
+   * Bitmasks for the 8 dots of a physical 2x4 braille/graphic cell in {@link DisplayMode#TextMode}:
+   * left column (xOffset = 0) = dots 1, 2, 3, 7 (bits 0, 1, 2, 6); right column (xOffset = 1) =
+   * dots 4, 5, 6, 8 (bits 3, 4, 5, 7).
+   */
+  private static final int[][] PHYSICAL_CELL_PIN_BIT = {
+    // xOffset = 0 (left column of physical cell: dots 1, 2, 3, 7)
+    {0x01, 0x02, 0x04, 0x40},
+    // xOffset = 1 (right column of physical cell: dots 4, 5, 6, 8)
+    {0x08, 0x10, 0x20, 0x80}
+  };
 
   /** Listener for BLE scan events from {@link DotPadScanner}. */
   public interface ScanCallback {
@@ -127,9 +166,14 @@ public class DotPadDriver implements Encoder {
   @Nullable private volatile ConnectionCallback connectionCallback;
   @Nullable private volatile D2dConnection.Callback trafficCallback;
   @Nullable private volatile DotDevice connectedDotDevice;
-  @Nullable private String lastBrailleLineHex;
-  @Nullable private String inFlightBrailleLineHex;
-  @Nullable private String queuedBrailleLineHex;
+  /** Latest page of physical row hex strings requested by TalkBack. */
+  @Nullable private String[] lastPageRowHex;
+  /** Physical row hex strings most recently sent to the device for each row {@code 0..9}. */
+  @Nullable private String[] sentPageRowHex;
+  /** Page of physical row hex strings currently in flight to the device. */
+  @Nullable private String[] inFlightPageRowHex;
+  /** Coalesced page of physical row hex strings waiting for the in-flight write to complete. */
+  @Nullable private String[] queuedPageRowHex;
   private boolean writeInFlight;
   private boolean boardInfoReady;
 
@@ -171,7 +215,7 @@ public class DotPadDriver implements Encoder {
   public void connect(BluetoothDevice bluetoothDevice, ConnectionCallback callback) {
     this.connectionCallback = callback;
     synchronized (writeLock) {
-      resetWriteStateLocked(/* keepLastLine= */ false);
+      resetWriteStateLocked(/* keepLastPage= */ false);
       boardInfoReady = false;
     }
     pendingCommands.clear();
@@ -190,7 +234,7 @@ public class DotPadDriver implements Encoder {
     DotDevice device = this.connectedDotDevice;
     this.connectedDotDevice = null;
     synchronized (writeLock) {
-      resetWriteStateLocked(/* keepLastLine= */ false);
+      resetWriteStateLocked(/* keepLastPage= */ false);
       boardInfoReady = false;
     }
     pendingCommands.clear();
@@ -212,8 +256,24 @@ public class DotPadDriver implements Encoder {
   @Override
   public Optional<BrailleDisplayProperties> start(
       String deviceName, int vendorId, int prodId, boolean useHid, String parameters) {
+    DotDevice device = connectedDotDevice;
+    int numTextCells = getLogicalColumns(device);
+    int numTextRows = getLogicalRows(device);
     BrailleDisplayLog.d(
-        TAG, "Starting DotPadDriver encoder for device: " + deviceName + " (20 cells)");
+        TAG,
+        "Starting DotPadDriver encoder for device: "
+            + deviceName
+            + " ("
+            + numTextCells
+            + "x"
+            + numTextRows
+            + " = "
+            + (numTextCells * numTextRows)
+            + " logical cells across "
+            + getPhysicalGraphicColumns(device)
+            + "x"
+            + getPhysicalGraphicRows(device)
+            + " physical cells)");
     DeviceInfo deviceInfo = SupportedDevicesHelper.getDeviceInfo(deviceName, useHid);
     BrailleKeyBinding[] keyBindings = createDefaultKeyBindings();
     Map<String, String> friendlyKeyNames = new HashMap<>();
@@ -222,21 +282,21 @@ public class DotPadDriver implements Encoder {
         friendlyKeyNames.put(entry.getKey(), appContext.getString(entry.getValue()));
       }
     }
-    int numTextCells = NUM_TEXT_CELLS;
-    DotDevice dotDevice = connectedDotDevice;
-    if (dotDevice != null && dotDevice.getNumberBrailleCellColumns() > 0) {
-      numTextCells = dotDevice.getNumberBrailleCellColumns();
-    }
     return Optional.of(
         new BrailleDisplayProperties(
-            DRIVER_CODE, numTextCells, NUM_STATUS_CELLS, keyBindings, friendlyKeyNames));
+            DRIVER_CODE,
+            numTextCells,
+            numTextRows,
+            NUM_STATUS_CELLS,
+            keyBindings,
+            friendlyKeyNames));
   }
 
   @Override
   public void stop() {
     BrailleDisplayLog.d(TAG, "Stopping DotPadDriver encoder");
     synchronized (writeLock) {
-      resetWriteStateLocked(/* keepLastLine= */ false);
+      resetWriteStateLocked(/* keepLastPage= */ false);
     }
     pendingCommands.clear();
   }
@@ -251,75 +311,183 @@ public class DotPadDriver implements Encoder {
     if (brailleDotBytes == null) {
       return;
     }
-    int numCells = NUM_TEXT_CELLS;
     DotDevice device = connectedDotDevice;
-    if (device != null && device.getNumberBrailleCellColumns() > 0) {
-      numCells = device.getNumberBrailleCellColumns();
-    }
-    String hexLine = toHexLine(brailleDotBytes, numCells);
-    enqueueOrSendBrailleLine(hexLine);
+    int physicalColumns = getPhysicalGraphicColumns(device);
+    int physicalRows = getPhysicalGraphicRows(device);
+    int logicalColumns = getLogicalColumns(device);
+    int logicalRows = getLogicalRows(device);
+    String[] pageRowHex =
+        renderSpacedBraillePageToHexRows(
+            brailleDotBytes, logicalColumns, logicalRows, physicalColumns, physicalRows);
+    enqueueOrSendPage(pageRowHex);
   }
 
-  private void enqueueOrSendBrailleLine(String hexLine) {
-    String lineToSendNow = null;
+  private static int getPhysicalGraphicColumns(@Nullable DotDevice device) {
+    if (device != null && device.getNumberCellColumns() > 0) {
+      return device.getNumberCellColumns();
+    }
+    return PHYSICAL_GRAPHIC_COLUMNS;
+  }
+
+  private static int getPhysicalGraphicRows(@Nullable DotDevice device) {
+    if (device != null && device.getNumberCellRows() > 0) {
+      return device.getNumberCellRows();
+    }
+    return PHYSICAL_GRAPHIC_ROWS;
+  }
+
+  private static int getLogicalColumns(@Nullable DotDevice device) {
+    int totalPinCols = getPhysicalGraphicColumns(device) * PINS_PER_PHYSICAL_CELL_COL;
+    return Math.max(1, totalPinCols / LOGICAL_CELL_STRIDE_X);
+  }
+
+  private static int getLogicalRows(@Nullable DotDevice device) {
+    int totalPinRows = getPhysicalGraphicRows(device) * PINS_PER_PHYSICAL_CELL_ROW;
+    return Math.max(1, totalPinRows / LOGICAL_CELL_STRIDE_Y);
+  }
+
+  /**
+   * Renders a page of logical braille cells ({@code logicalColumns} x {@code logicalRows}) onto the
+   * Dot Pad's physical graphics cell grid ({@code physicalColumns} x {@code physicalRows}) with a
+   * 1-dot horizontal gap between adjacent logical cells and a 1-dot vertical gap between adjacent
+   * logical lines.
+   *
+   * <p>On the 30x10 physical cell grid (60x40 pins), each logical cell occupies 2x4 pins at pin
+   * origin {@code (logicalCol * 3, logicalRow * 5)}:
+   *
+   * <ul>
+   *   <li>Even logical columns ({@code logicalCol = 0, 2, ...}) align with physical cell {@code
+   *       (logicalCol / 2) * 3} (left column = physical left column, right column = physical right
+   *       column), followed by 1 blank pin in the left column of physical cell {@code +1}.
+   *   <li>Odd logical columns ({@code logicalCol = 1, 3, ...}) straddle physical cells: their left
+   *       column (dots 1, 2, 3, 7) is rendered on the right column (dots 4, 5, 6, 8) of physical
+   *       cell {@code (logicalCol / 2) * 3 + 1}, and their right column (dots 4, 5, 6, 8) is
+   *       rendered on the left column (dots 1, 2, 3, 7) of physical cell {@code (logicalCol / 2) *
+   *       3 + 2}, followed by 1 blank pin in the right column of physical cell {@code +2}.
+   *   <li>Vertically, logical row {@code logicalRow} starts at pin row {@code logicalRow * 5},
+   *       leaving 1 blank pin row between consecutive logical braille lines, so 8 logical lines
+   *       span the 10 physical graphic lines (40 pin rows).
+   * </ul>
+   */
+  public static String[] renderSpacedBraillePageToHexRows(
+      byte[] logicalBrailleBytes,
+      int logicalColumns,
+      int logicalRows,
+      int physicalColumns,
+      int physicalRows) {
+    int totalPinCols = physicalColumns * PINS_PER_PHYSICAL_CELL_COL;
+    int totalPinRows = physicalRows * PINS_PER_PHYSICAL_CELL_ROW;
+    byte[][] physicalCells = new byte[physicalRows][physicalColumns];
+
+    for (int lRow = 0; lRow < logicalRows; lRow++) {
+      int pinYBase = lRow * LOGICAL_CELL_STRIDE_Y;
+      for (int lCol = 0; lCol < logicalColumns; lCol++) {
+        int logicalIndex = lRow * logicalColumns + lCol;
+        if (logicalIndex >= logicalBrailleBytes.length) {
+          break;
+        }
+        int cellBits = logicalBrailleBytes[logicalIndex] & 0xFF;
+        if (cellBits == 0) {
+          continue;
+        }
+        int pinXBase = lCol * LOGICAL_CELL_STRIDE_X;
+        for (int dx = 0; dx < LOGICAL_CELL_WIDTH_PINS; dx++) {
+          int pinX = pinXBase + dx;
+          if (pinX >= totalPinCols) {
+            continue;
+          }
+          int physCol = pinX / PINS_PER_PHYSICAL_CELL_COL;
+          int physXOffset = pinX % PINS_PER_PHYSICAL_CELL_COL;
+          for (int dy = 0; dy < LOGICAL_CELL_HEIGHT_PINS; dy++) {
+            int sourceBit = PHYSICAL_CELL_PIN_BIT[dx][dy];
+            if ((cellBits & sourceBit) == 0) {
+              continue;
+            }
+            int pinY = pinYBase + dy;
+            if (pinY >= totalPinRows) {
+              continue;
+            }
+            int physRow = pinY / PINS_PER_PHYSICAL_CELL_ROW;
+            int physYOffset = pinY % PINS_PER_PHYSICAL_CELL_ROW;
+            physicalCells[physRow][physCol] |=
+                (byte) PHYSICAL_CELL_PIN_BIT[physXOffset][physYOffset];
+          }
+        }
+      }
+    }
+
+    String[] hexRows = new String[physicalRows];
+    for (int pRow = 0; pRow < physicalRows; pRow++) {
+      hexRows[pRow] = toHexLine(physicalCells[pRow], physicalColumns);
+    }
+    return hexRows;
+  }
+
+  private void enqueueOrSendPage(String[] pageRowHex) {
+    String[] pageToSendNow = null;
+    String[] prevSentSnapshot = null;
     DotDevice deviceToSend = null;
     synchronized (writeLock) {
-      lastBrailleLineHex = hexLine;
+      lastPageRowHex = pageRowHex;
       DotDevice device = connectedDotDevice;
       if (device == null || !boardInfoReady) {
-        queuedBrailleLineHex = hexLine;
-        BrailleDisplayLog.v(
-            TAG, "Queueing braille line until DotPad BoardInfo is ready: " + hexLine);
+        queuedPageRowHex = pageRowHex;
+        BrailleDisplayLog.v(TAG, "Queueing multi-line page until DotPad BoardInfo is ready");
         return;
       }
       if (writeInFlight) {
-        if (!Objects.equals(hexLine, inFlightBrailleLineHex)) {
-          queuedBrailleLineHex = hexLine;
-          BrailleDisplayLog.v(
-              TAG, "Write in flight; coalescing latest braille line for next ACK: " + hexLine);
+        if (!Arrays.equals(pageRowHex, inFlightPageRowHex)) {
+          queuedPageRowHex = pageRowHex;
+          BrailleDisplayLog.v(TAG, "Write in flight; coalescing latest multi-line page");
         } else {
-          queuedBrailleLineHex = null;
+          queuedPageRowHex = null;
         }
         return;
       }
-      if (Objects.equals(hexLine, inFlightBrailleLineHex)) {
+      if (Arrays.equals(pageRowHex, sentPageRowHex)) {
         return;
       }
       writeInFlight = true;
-      inFlightBrailleLineHex = hexLine;
-      queuedBrailleLineHex = null;
-      lineToSendNow = hexLine;
+      inFlightPageRowHex = pageRowHex;
+      queuedPageRowHex = null;
+      prevSentSnapshot = (sentPageRowHex != null) ? sentPageRowHex.clone() : null;
+      sentPageRowHex = pageRowHex.clone();
+      pageToSendNow = pageRowHex;
       deviceToSend = device;
       scheduleWriteAckTimeoutLocked();
     }
-    sendLineToDevice(lineToSendNow, deviceToSend);
+    sendPageToDevice(pageToSendNow, prevSentSnapshot, deviceToSend);
   }
 
   private void onWriteAckOrComplete(String reason) {
-    String nextLine = null;
+    String[] nextPage = null;
+    String[] prevSentSnapshot = null;
     DotDevice device = null;
     synchronized (writeLock) {
       cancelWriteAckTimeoutLocked();
       writeInFlight = false;
-      if (queuedBrailleLineHex != null && connectedDotDevice != null && boardInfoReady) {
-        if (!Objects.equals(queuedBrailleLineHex, inFlightBrailleLineHex)) {
-          nextLine = queuedBrailleLineHex;
-          inFlightBrailleLineHex = nextLine;
+      inFlightPageRowHex = null;
+      if (queuedPageRowHex != null && connectedDotDevice != null && boardInfoReady) {
+        if (!Arrays.equals(queuedPageRowHex, sentPageRowHex)) {
+          nextPage = queuedPageRowHex;
+          inFlightPageRowHex = nextPage;
+          prevSentSnapshot = (sentPageRowHex != null) ? sentPageRowHex.clone() : null;
+          sentPageRowHex = nextPage.clone();
           writeInFlight = true;
           device = connectedDotDevice;
           scheduleWriteAckTimeoutLocked();
         }
-        queuedBrailleLineHex = null;
+        queuedPageRowHex = null;
       }
     }
-    if (nextLine != null && device != null) {
-      BrailleDisplayLog.v(TAG, "Flushing coalesced braille line after " + reason + ": " + nextLine);
-      sendLineToDevice(nextLine, device);
+    if (nextPage != null && device != null) {
+      BrailleDisplayLog.v(TAG, "Flushing coalesced multi-line page after " + reason);
+      sendPageToDevice(nextPage, prevSentSnapshot, device);
     }
   }
 
   private void onWriteAckTimeout() {
-    BrailleDisplayLog.v(TAG, "Write ACK timeout elapsed; unblocking next queued braille line");
+    BrailleDisplayLog.v(TAG, "Write ACK timeout elapsed; unblocking next queued page");
     onWriteAckOrComplete("ACK timeout");
   }
 
@@ -384,27 +552,55 @@ public class DotPadDriver implements Encoder {
     mainHandler.removeCallbacks(writeAckTimeoutRunnable);
   }
 
-  private void resetWriteStateLocked(boolean keepLastLine) {
+  private void resetWriteStateLocked(boolean keepLastPage) {
     cancelWriteAckTimeoutLocked();
     writeInFlight = false;
-    inFlightBrailleLineHex = null;
-    if (!keepLastLine) {
-      lastBrailleLineHex = null;
-      queuedBrailleLineHex = null;
+    inFlightPageRowHex = null;
+    sentPageRowHex = null;
+    if (!keepLastPage) {
+      lastPageRowHex = null;
+      queuedPageRowHex = null;
     } else {
-      queuedBrailleLineHex = lastBrailleLineHex;
+      queuedPageRowHex = lastPageRowHex;
     }
   }
 
-  private void sendLineToDevice(String hexLine, @Nullable DotDevice device) {
-    try {
-      BrailleDisplayLog.v(TAG, "displayLineData (lineId=0): " + hexLine);
-      DotPadProcess.INSTANCE.displayLineData(
-          BRAILLE_LINE_ID, START_CELL_INDEX, hexLine, DisplayMode.TextMode, device);
-    } catch (RuntimeException e) {
-      BrailleDisplayLog.e(TAG, "Failed to send braille dots via displayLineData", e);
-      onWriteAckOrComplete("displayLineData exception");
+  private void sendPageToDevice(
+      String[] pageRowHex, @Nullable String[] prevSentRowHex, @Nullable DotDevice device) {
+    if (device == null) {
+      onWriteAckOrComplete("device null");
+      return;
     }
+    // Dispatch on mainHandler so all dirty rows (1..10) are marked in dotPadSendModule before
+    // dotPadSendModule's posted mainLooper runnable bundles and transmits them.
+    mainHandler.post(
+        () -> {
+          boolean anyRowSent = false;
+          try {
+            for (int row = 0; row < pageRowHex.length; row++) {
+              String rowHex = pageRowHex[row];
+              String prevHex =
+                  (prevSentRowHex != null && row < prevSentRowHex.length)
+                      ? prevSentRowHex[row]
+                      : null;
+              if (Objects.equals(rowHex, prevHex)) {
+                continue;
+              }
+              int lineId = GRAPHIC_FIRST_LINE_ID + row;
+              BrailleDisplayLog.v(TAG, "displayLineData (lineId=" + lineId + "): " + rowHex);
+              DotPadProcess.INSTANCE.displayLineData(
+                  lineId, START_CELL_INDEX, rowHex, DisplayMode.TextMode, device);
+              anyRowSent = true;
+            }
+          } catch (RuntimeException e) {
+            BrailleDisplayLog.e(TAG, "Failed to send braille page via displayLineData", e);
+            onWriteAckOrComplete("displayLineData exception");
+            return;
+          }
+          if (!anyRowSent) {
+            onWriteAckOrComplete("no changed rows");
+          }
+        });
   }
 
   /**
@@ -544,7 +740,7 @@ public class DotPadDriver implements Encoder {
 
         @Override
         public void onUSBScan(List<? extends UsbDevice> devices) {
-          // USB support is out of scope for Phase 2 POC.
+          // USB support is out of scope for Phase 2/3.
         }
 
         @Override
@@ -568,14 +764,15 @@ public class DotPadDriver implements Encoder {
           if (dataCode == DataCodes.Connected) {
             connectedDotDevice = device;
             DotPadProcess.INSTANCE.setAutoRefresh(true, device);
-            String pendingToFlush = null;
+            String[] pendingToFlush = null;
             synchronized (writeLock) {
               boardInfoReady = true;
-              resetWriteStateLocked(/* keepLastLine= */ true);
-              if (queuedBrailleLineHex != null) {
-                pendingToFlush = queuedBrailleLineHex;
-                inFlightBrailleLineHex = pendingToFlush;
-                queuedBrailleLineHex = null;
+              resetWriteStateLocked(/* keepLastPage= */ true);
+              if (queuedPageRowHex != null) {
+                pendingToFlush = queuedPageRowHex;
+                inFlightPageRowHex = pendingToFlush;
+                sentPageRowHex = pendingToFlush.clone();
+                queuedPageRowHex = null;
                 writeInFlight = true;
                 scheduleWriteAckTimeoutLocked();
               }
@@ -586,8 +783,8 @@ public class DotPadDriver implements Encoder {
             }
             if (pendingToFlush != null) {
               BrailleDisplayLog.d(
-                  TAG, "Connected/BoardInfo ready; flushing initial braille line to DotPad");
-              sendLineToDevice(pendingToFlush, device);
+                  TAG, "Connected/BoardInfo ready; flushing initial multi-line page to DotPad");
+              sendPageToDevice(pendingToFlush, /* prevSentRowHex= */ null, device);
             }
           } else if (dataCode == DataCodes.BoardInfo) {
             connectedDotDevice = device;
@@ -606,7 +803,7 @@ public class DotPadDriver implements Encoder {
           } else if (dataCode == DataCodes.Reconnecting) {
             synchronized (writeLock) {
               boardInfoReady = false;
-              resetWriteStateLocked(/* keepLastLine= */ true);
+              resetWriteStateLocked(/* keepLastPage= */ true);
             }
             int attempt = 1;
             try {
@@ -623,7 +820,7 @@ public class DotPadDriver implements Encoder {
             connectedDotDevice = null;
             synchronized (writeLock) {
               boardInfoReady = false;
-              resetWriteStateLocked(/* keepLastLine= */ false);
+              resetWriteStateLocked(/* keepLastPage= */ false);
             }
             pendingCommands.clear();
             ConnectionCallback cb = connectionCallback;
@@ -634,7 +831,7 @@ public class DotPadDriver implements Encoder {
             connectedDotDevice = null;
             synchronized (writeLock) {
               boardInfoReady = false;
-              resetWriteStateLocked(/* keepLastLine= */ false);
+              resetWriteStateLocked(/* keepLastPage= */ false);
             }
             pendingCommands.clear();
             ConnectionCallback cb = connectionCallback;

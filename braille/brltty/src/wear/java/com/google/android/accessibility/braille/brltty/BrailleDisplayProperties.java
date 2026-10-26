@@ -26,6 +26,7 @@ import java.util.Map;
 public class BrailleDisplayProperties implements Parcelable {
   private final String deviceName;
   private final int numTextCells;
+  private final int numTextRows;
   private final int numStatusCells;
   private final BrailleKeyBinding[] keyBindings;
   private final Map<String, String> friendlyKeyNames;
@@ -36,7 +37,24 @@ public class BrailleDisplayProperties implements Parcelable {
       int numStatusCells,
       BrailleKeyBinding[] keyBindings,
       Map<String, String> friendlyKeyNames) {
+    this(
+        name,
+        numTextCells,
+        /* numTextRows= */ 1,
+        numStatusCells,
+        keyBindings,
+        friendlyKeyNames);
+  }
+
+  public BrailleDisplayProperties(
+      String name,
+      int numTextCells,
+      int numTextRows,
+      int numStatusCells,
+      BrailleKeyBinding[] keyBindings,
+      Map<String, String> friendlyKeyNames) {
     this.numTextCells = numTextCells;
+    this.numTextRows = Math.max(1, numTextRows);
     this.numStatusCells = numStatusCells;
     this.keyBindings = keyBindings;
     this.friendlyKeyNames = friendlyKeyNames;
@@ -46,6 +64,7 @@ public class BrailleDisplayProperties implements Parcelable {
   private BrailleDisplayProperties(Parcel in) {
     deviceName = in.readString();
     numTextCells = in.readInt();
+    numTextRows = in.readInt();
     numStatusCells = in.readInt();
     keyBindings = in.createTypedArray(BrailleKeyBinding.CREATOR);
     int size = in.readInt();
@@ -57,10 +76,27 @@ public class BrailleDisplayProperties implements Parcelable {
   }
 
   /**
-   * Returns the number of cells on the main display intended for display of text or other content.
+   * Returns the number of cells per row on the main display intended for display of text or other
+   * content.
    */
   public int getNumTextCells() {
     return numTextCells;
+  }
+
+  /**
+   * Returns the number of text rows on the main display. This value is {@code 1} for single-line
+   * displays and greater than {@code 1} for multi-line displays.
+   */
+  public int getNumTextRows() {
+    return numTextRows;
+  }
+
+  /**
+   * Returns the total number of cells across all rows on the main display ({@code numTextCells *
+   * numTextRows}).
+   */
+  public int getTotalTextCells() {
+    return numTextCells * numTextRows;
   }
 
   /**
@@ -92,9 +128,9 @@ public class BrailleDisplayProperties implements Parcelable {
   @Override
   public String toString() {
     return String.format(
-        "BrailleDisplayProperties [numTextCells: %d, numStatusCells: %d, "
+        "BrailleDisplayProperties [numTextCells: %d, numTextRows: %d, numStatusCells: %d, "
             + "keyBindings: %d], deviceName: %s",
-        numTextCells, numStatusCells, keyBindings.length, deviceName);
+        numTextCells, numTextRows, numStatusCells, keyBindings.length, deviceName);
   }
 
   // For Parcelable support.
@@ -121,6 +157,7 @@ public class BrailleDisplayProperties implements Parcelable {
   public void writeToParcel(Parcel out, int flags) {
     out.writeString(deviceName);
     out.writeInt(numTextCells);
+    out.writeInt(numTextRows);
     out.writeInt(numStatusCells);
     out.writeTypedArray(keyBindings, flags);
     out.writeInt(friendlyKeyNames.size());

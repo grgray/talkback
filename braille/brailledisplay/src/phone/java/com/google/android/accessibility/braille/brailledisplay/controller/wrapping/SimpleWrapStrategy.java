@@ -26,6 +26,10 @@ public class SimpleWrapStrategy extends WrapStrategy {
     super(displayWidth);
   }
 
+  public SimpleWrapStrategy(int displayWidth, int displayRows) {
+    super(displayWidth, displayRows);
+  }
+
   @Override
   void calculateBreakPoints() {}
 

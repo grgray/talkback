@@ -36,6 +36,10 @@ public class EditorWordWrapStrategy extends WrapStrategy {
     super(displayWidth);
   }
 
+  public EditorWordWrapStrategy(int displayWidth, int displayRows) {
+    super(displayWidth, displayRows);
+  }
+
   @Override
   void calculateBreakPoints() {
     final int preserve = (int) (displayWidth * FRACTION);

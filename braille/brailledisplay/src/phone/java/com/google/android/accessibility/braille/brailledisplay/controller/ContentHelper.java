@@ -27,6 +27,7 @@ import android.text.Spanned;
 import android.text.SpannedString;
 import android.text.style.ClickableSpan;
 import android.util.Range;
+import android.util.SparseIntArray;
 import androidx.annotation.Nullable;
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayLog;
@@ -202,6 +203,33 @@ public class ContentHelper {
     // Second page: "o"
     // If user is at the second page and clicks on the second routing button, it's out of range.
     WrapStrategy wrapStrategy = wrapStrategyRetriever.getWrapStrategy();
+    if (wrapStrategy.getDisplayRows() > 1 && wrapStrategy.getDisplayWidth() > 0) {
+      SparseIntArray lineBreaks = wrapStrategy.getLineBreaks();
+      int startLineIndex = lineBreaks.indexOfKey(wrapStrategy.getDisplayStart());
+      int endLineIndex = lineBreaks.indexOfKey(wrapStrategy.getDisplayEnd());
+      if (startLineIndex >= 0 && endLineIndex > startLineIndex) {
+        int displayWidth = wrapStrategy.getDisplayWidth();
+        int row = routingPosition / displayWidth;
+        int col = routingPosition % displayWidth;
+        int lineIndex = startLineIndex + row;
+        if (row < 0 || col < 0 || lineIndex >= endLineIndex) {
+          BrailleDisplayLog.i(
+              "User clicked on outside of the currently displayed content: " + routingPosition,
+              null);
+          return NO_CURSOR;
+        }
+        int rowStart = lineBreaks.keyAt(lineIndex);
+        int rowEnd = Math.min(rowStart + displayWidth, lineBreaks.keyAt(lineIndex + 1));
+        int offsetArgument = rowStart + col;
+        if (offsetArgument >= rowEnd) {
+          BrailleDisplayLog.i(
+              "User clicked on outside of the currently displayed row content: " + offsetArgument,
+              null);
+          return NO_CURSOR;
+        }
+        return offsetArgument;
+      }
+    }
     int offsetArgument = routingPosition + wrapStrategy.getDisplayStart();
     if (offsetArgument >= wrapStrategy.getDisplayEnd()) {
       // The event is outside the currently displayed content, drop the event.
@@ -224,6 +252,27 @@ public class ContentHelper {
     }
     if (displayEnd < displayStart) {
       return null;
+    }
+
+    WrapStrategy wrapStrategy = wrapStrategyRetriever.getWrapStrategy();
+    if (wrapStrategy != null
+        && wrapStrategy.getDisplayRows() > 1
+        && wrapStrategy.getDisplayWidth() > 0) {
+      SparseIntArray lineBreaks = wrapStrategy.getLineBreaks();
+      int startLineIndex = lineBreaks.indexOfKey(displayStart);
+      int endLineIndex = lineBreaks.indexOfKey(displayEnd);
+      if (startLineIndex >= 0 && endLineIndex > startLineIndex) {
+        return getMultiLineDisplayInfo(
+            text,
+            displayStart,
+            displayEnd,
+            startLineIndex,
+            endLineIndex,
+            lineBreaks,
+            wrapStrategy.getDisplayWidth(),
+            brailleToTextPositions,
+            source);
+      }
     }
 
     // Compute equivalent text and mapping.
@@ -258,6 +307,81 @@ public class ContentHelper {
     } else {
       displayedOverlaidBraille = displayedBraille;
     }
+    return DisplayInfo.builder()
+        .setDisplayedBraille(ByteBuffer.wrap(displayedBraille.toByteArray()))
+        .setDisplayedOverlaidBraille(ByteBuffer.wrap(displayedOverlaidBraille.toByteArray()))
+        .setDisplayedText(newText.toString())
+        .setDisplayedBrailleToTextPositions(
+            stream(trimmedBrailleToTextPositions).boxed().collect(Collectors.toList()))
+        .setBlink(!displayedBraille.equals(displayedOverlaidBraille))
+        .setSource(source)
+        .build();
+  }
+
+  private DisplayInfo getMultiLineDisplayInfo(
+      CharSequence text,
+      int displayStart,
+      int displayEnd,
+      int startLineIndex,
+      int endLineIndex,
+      SparseIntArray lineBreaks,
+      int displayWidth,
+      List<Integer> brailleToTextPositions,
+      Source source) {
+    int textLeft =
+        displayStart >= brailleToTextPositions.size()
+            ? 0
+            : brailleToTextPositions.get(displayStart);
+    int textRight =
+        displayEnd >= brailleToTextPositions.size()
+            ? text.length()
+            : brailleToTextPositions.get(displayEnd);
+    if (textRight < textLeft) {
+      textRight = textLeft;
+    }
+    StringBuilder newText = new StringBuilder(text.subSequence(textLeft, textRight));
+    int numLinesOnPage = endLineIndex - startLineIndex;
+    int totalPageCells = numLinesOnPage * displayWidth;
+    int[] trimmedBrailleToTextPositions = new int[totalPageCells];
+    BrailleWord displayedBraille = new BrailleWord();
+    boolean hasOverlay = brailleContent != overlaidBrailleContent;
+    BrailleWord displayedOverlaidBraille = hasOverlay ? new BrailleWord() : displayedBraille;
+
+    for (int lineIdx = startLineIndex; lineIdx < endLineIndex; lineIdx++) {
+      int rowOffset = (lineIdx - startLineIndex) * displayWidth;
+      int rowStart = lineBreaks.keyAt(lineIdx);
+      int rowRawEnd = lineBreaks.keyAt(lineIdx + 1);
+      int rowEnd = Math.min(rowStart + displayWidth, Math.min(rowRawEnd, brailleContent.size()));
+      if (rowEnd < rowStart) {
+        rowEnd = rowStart;
+      }
+      int rowLen = rowEnd - rowStart;
+      displayedBraille.append(brailleContent.subword(rowStart, rowEnd));
+      if (hasOverlay) {
+        displayedOverlaidBraille.append(overlaidBrailleContent.subword(rowStart, rowEnd));
+      }
+      int padCount = displayWidth - rowLen;
+      for (int p = 0; p < padCount; p++) {
+        displayedBraille.append(BrailleCharacter.EMPTY_CELL);
+        if (hasOverlay) {
+          displayedOverlaidBraille.append(BrailleCharacter.EMPTY_CELL);
+        }
+      }
+      int rowEndTextPos =
+          rowEnd < brailleToTextPositions.size()
+              ? Math.max(0, brailleToTextPositions.get(rowEnd) - textLeft)
+              : newText.length();
+      for (int col = 0; col < displayWidth; col++) {
+        int cellIndex = rowStart + col;
+        if (col < rowLen && cellIndex < brailleToTextPositions.size()) {
+          trimmedBrailleToTextPositions[rowOffset + col] =
+              Math.max(0, brailleToTextPositions.get(cellIndex) - textLeft);
+        } else {
+          trimmedBrailleToTextPositions[rowOffset + col] = rowEndTextPos;
+        }
+      }
+    }
+
     return DisplayInfo.builder()
         .setDisplayedBraille(ByteBuffer.wrap(displayedBraille.toByteArray()))
         .setDisplayedOverlaidBraille(ByteBuffer.wrap(displayedOverlaidBraille.toByteArray()))

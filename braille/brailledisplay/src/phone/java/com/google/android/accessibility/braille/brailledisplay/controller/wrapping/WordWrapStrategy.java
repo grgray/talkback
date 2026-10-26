@@ -27,6 +27,10 @@ public class WordWrapStrategy extends WrapStrategy {
     super(displayWidth);
   }
 
+  public WordWrapStrategy(int displayWidth, int displayRows) {
+    super(displayWidth, displayRows);
+  }
+
   @Override
   protected void calculateBreakPoints() {
     WrapStrategyUtils.addWordWrapBreakPoints(

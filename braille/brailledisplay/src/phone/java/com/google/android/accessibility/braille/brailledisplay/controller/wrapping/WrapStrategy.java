@@ -100,12 +100,33 @@ public abstract class WrapStrategy {
   SparseIntArray lineBreaks = new SparseIntArray();
 
   final int displayWidth;
+  final int displayRows;
   TranslationResult translation;
   int startIndexOfInput;
   int endIndexOfInput;
 
   public WrapStrategy(int displayWidth) {
+    this(displayWidth, /* displayRows= */ 1);
+  }
+
+  public WrapStrategy(int displayWidth, int displayRows) {
     this.displayWidth = displayWidth;
+    this.displayRows = Math.max(1, displayRows);
+  }
+
+  /** Returns the number of cells per row on the display. */
+  public int getDisplayWidth() {
+    return displayWidth;
+  }
+
+  /** Returns the number of rows on the display. */
+  public int getDisplayRows() {
+    return displayRows;
+  }
+
+  /** Returns the precomputed line break positions for the current content. */
+  public SparseIntArray getLineBreaks() {
+    return lineBreaks;
   }
 
   public void setContent(boolean isMultiLine, TranslationResult translation) {
@@ -212,7 +233,10 @@ public abstract class WrapStrategy {
   }
 
   public int getDisplayEnd() {
-    return Math.min(getDisplayStart() + displayWidth, displayEnd);
+    if (displayRows <= 1) {
+      return Math.min(getDisplayStart() + displayWidth, displayEnd);
+    }
+    return displayEnd;
   }
 
   /**
@@ -223,7 +247,7 @@ public abstract class WrapStrategy {
     // Use a findRightLimit to find out the position of the split points from displayed start
     // position. Return true if the position of split point is between displayed start position and
     // displayed end position(displayed start position + display width).
-    return findRightLimit(splitPoints, getDisplayStart()) <= getDisplayStart() + displayWidth;
+    return findRightLimit(splitPoints, getDisplayStart()) <= getDisplayEnd();
   }
 
   /**
@@ -303,8 +327,15 @@ public abstract class WrapStrategy {
       return;
     }
 
-    displayStart = lineBreaks.keyAt(index);
-    displayEnd = lineBreaks.keyAt(index + 1);
+    if (displayRows <= 1) {
+      displayStart = lineBreaks.keyAt(index);
+      displayEnd = lineBreaks.keyAt(index + 1);
+    } else {
+      int startLineIndex = fix ? (index / displayRows) * displayRows : index;
+      int endLineIndex = Math.min(startLineIndex + displayRows, lineBreaks.size() - 1);
+      displayStart = lineBreaks.keyAt(startLineIndex);
+      displayEnd = lineBreaks.keyAt(endLineIndex);
+    }
   }
 
   /**
@@ -322,8 +353,15 @@ public abstract class WrapStrategy {
       return false;
     }
 
-    displayEnd = displayStart;
-    displayStart = lineBreaks.keyAt(index - 1);
+    if (displayRows <= 1) {
+      displayEnd = displayStart;
+      displayStart = lineBreaks.keyAt(index - 1);
+    } else {
+      int prevStartLineIndex = Math.max(0, index - displayRows);
+      int prevEndLineIndex = Math.min(prevStartLineIndex + displayRows, lineBreaks.size() - 1);
+      displayStart = lineBreaks.keyAt(prevStartLineIndex);
+      displayEnd = lineBreaks.keyAt(prevEndLineIndex);
+    }
     return true;
   }
 
@@ -342,8 +380,14 @@ public abstract class WrapStrategy {
       return false;
     }
 
-    displayStart = displayEnd;
-    displayEnd = lineBreaks.keyAt(index + 1);
+    if (displayRows <= 1) {
+      displayStart = displayEnd;
+      displayEnd = lineBreaks.keyAt(index + 1);
+    } else {
+      displayStart = displayEnd;
+      int nextEndLineIndex = Math.min(index + displayRows, lineBreaks.size() - 1);
+      displayEnd = lineBreaks.keyAt(nextEndLineIndex);
+    }
     return true;
   }
 
