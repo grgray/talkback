@@ -234,7 +234,7 @@ public class Connectioneer {
 
   private ImmutableSet<ConnectableDevice> getBondedDeviceSet() {
     return connectManagerProxy.getBondedDevices().stream()
-        .filter(device -> allowDevice(device.name()))
+        .filter(device -> allowDevice(device))
         .collect(toImmutableSet());
   }
 
@@ -308,9 +308,14 @@ public class Connectioneer {
   }
 
   private boolean acceptAutoConnect(ConnectableDevice device) {
-    return allowDevice(device.name())
+    return allowDevice(device)
         && !userDisconnectedDevices.contains(device.address())
         && !userDeniedDevices.contains(device.address());
+  }
+
+  /** Returns true if TalkBack should list and connect to {@code device}. */
+  private boolean allowDevice(ConnectableDevice device) {
+    return allowDevice(device.name()) || DotPadDriver.isDotPadDevice(device);
   }
 
   private boolean allowDevice(String name) {
@@ -322,7 +327,8 @@ public class Connectioneer {
   }
 
   private boolean allowDeviceById(int vendorId, int prodId) {
-    return encoder.getDeviceVendorProdIdFilter().test(vendorId, prodId);
+    return encoder.getDeviceVendorProdIdFilter().test(vendorId, prodId)
+        || dotPadDriver.getDeviceVendorProdIdFilter().test(vendorId, prodId);
   }
 
   private boolean isConnectingOrConnected() {
@@ -515,7 +521,7 @@ public class Connectioneer {
     /** Gets a copy list of currently visible devices. */
     public List<ConnectableDevice> getScannedDevicesCopy() {
       return connectioneer.connectManagerProxy.getConnectableDevices().stream()
-          .filter(device -> connectioneer.allowDevice(device.name()))
+          .filter(device -> connectioneer.allowDevice(device))
           .collect(toCollection(ArrayList::new));
     }
 
@@ -631,7 +637,8 @@ public class Connectioneer {
 
     public Optional<BrailleDisplayProperties> start(
         String deviceName, int vendorId, int prodId, boolean useHid, String parameters) {
-      if (DotPadDriver.isDotPadDeviceName(deviceName)) {
+      if (DotPadDriver.isDotPadDeviceName(deviceName)
+          || DotPadDriver.isDotPadUsbId(vendorId, prodId)) {
         connectioneer.activeEncoder = connectioneer.dotPadDriver;
       } else {
         connectioneer.activeEncoder = connectioneer.encoder;
@@ -744,7 +751,7 @@ public class Connectioneer {
 
     @Override
     public void onDeviceSeenOrUpdated(ConnectableDevice device) {
-      if (allowDevice(device.name())) {
+      if (allowDevice(device)) {
         autoConnectIfPossible(ImmutableSet.of(device), ConnectReason.AUTO_CONNECT_DEVICE_SEEN);
         aspectConnection.notifyConnectableDeviceSeenOrUpdated(device);
       }

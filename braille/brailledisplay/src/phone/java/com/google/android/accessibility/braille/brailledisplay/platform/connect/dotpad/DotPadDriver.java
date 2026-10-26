@@ -19,12 +19,14 @@ package com.google.android.accessibility.braille.brailledisplay.platform.connect
 import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
+import android.hardware.usb.UsbDevice;
 import android.os.Handler;
 import android.os.Looper;
 import androidx.annotation.Nullable;
 import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayLog;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.D2dConnection;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
+import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableUsbDevice;
 import com.google.android.accessibility.braille.brltty.BrailleDisplayProperties;
 import com.google.android.accessibility.braille.brltty.BrailleInputEvent;
 import com.google.android.accessibility.braille.brltty.BrailleKeyBinding;
@@ -45,7 +47,7 @@ import java.util.function.Predicate;
 
 /**
  * Braille display driver for the Dot Pad (DotPad320X), speaking the Dot Pad protocol directly over
- * {@link DotPadBleTransport}.
+ * Bluetooth LE ({@link DotPadBleTransport}) or USB ({@link DotPadUsbTransport}).
  *
  * <p>Reports a multi-line display to TalkBack (20 logical braille cells x 8 logical lines on the
  * Dot Pad X), renders each page onto the graphics area with {@link DotPadPageRenderer}, and sends
@@ -145,14 +147,31 @@ public class DotPadDriver implements Encoder {
     return deviceName != null && deviceName.startsWith(DEVICE_NAME_PREFIX);
   }
 
-  /** Returns true if the given {@link ConnectableDevice} is a Dot Pad braille display. */
+  /** Returns true if {@code vendorId}/{@code productId} identify a Dot Pad connected over USB. */
+  public static boolean isDotPadUsbId(int vendorId, int productId) {
+    return DotPadUsbTransport.isDotPadUsbId(vendorId, productId);
+  }
+
+  /**
+   * Returns true if the given {@link ConnectableDevice} is a Dot Pad braille display: by name over
+   * Bluetooth, or by its USB serial chip's IDs over USB (its USB product name may be generic).
+   */
   public static boolean isDotPadDevice(@Nullable ConnectableDevice device) {
-    return device != null && isDotPadDeviceName(device.name());
+    if (device == null) {
+      return false;
+    }
+    if (device instanceof ConnectableUsbDevice) {
+      return isDotPadUsbId(device.vendorId(), device.productId());
+    }
+    return isDotPadDeviceName(device.name());
   }
 
   private final Context appContext;
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
-  private final DotPadBleTransport transport;
+  private final DotPadBleTransport bleTransport;
+  private final DotPadUsbTransport usbTransport;
+  /** The transport of the current connection, or {@code null} when disconnected. */
+  @Nullable private DotPadTransport transport;
   private final DotPadPacketParser parser = new DotPadPacketParser();
   private final DotPadKeyDecoder keyDecoder = new DotPadKeyDecoder();
   private final Queue<Integer> pendingCommands = new ConcurrentLinkedQueue<>();
@@ -183,7 +202,8 @@ public class DotPadDriver implements Encoder {
 
   private DotPadDriver(Context appContext) {
     this.appContext = appContext;
-    this.transport = new DotPadBleTransport(appContext, mainHandler);
+    this.bleTransport = new DotPadBleTransport(appContext, mainHandler);
+    this.usbTransport = new DotPadUsbTransport(appContext, mainHandler);
   }
 
   /** Sets the active {@link D2dConnection.Callback} used to notify TalkBack when key events arrive. */
@@ -193,12 +213,12 @@ public class DotPadDriver implements Encoder {
 
   /** Starts scanning for BLE Dot Pad devices. Main thread only. */
   public void startBleScan(ScanCallback callback) {
-    transport.startScan(DotPadDriver::isDotPadDeviceName, callback::onBleDeviceFound);
+    bleTransport.startScan(DotPadDriver::isDotPadDeviceName, callback::onBleDeviceFound);
   }
 
   /** Stops scanning for BLE Dot Pad devices. Main thread only. */
   public void stopBleScan() {
-    transport.stopScan();
+    bleTransport.stopScan();
   }
 
   /** Connects to a Dot Pad {@link BluetoothDevice}. Main thread only. */
@@ -206,8 +226,29 @@ public class DotPadDriver implements Encoder {
     BrailleDisplayLog.d(TAG, "Connecting to Dot Pad " + bluetoothDevice.getAddress());
     connectionCallback = callback;
     connectedNotified = false;
+    disconnectTransport();
     resetLinkState(/* keepPage= */ false);
-    transport.connect(bluetoothDevice, transportCallback);
+    transport = bleTransport;
+    bleTransport.connect(bluetoothDevice, transportCallback);
+  }
+
+  /** Connects to a Dot Pad {@link UsbDevice} that already has USB permission. Main thread only. */
+  public void connectUsb(UsbDevice usbDevice, ConnectionCallback callback) {
+    BrailleDisplayLog.d(TAG, "Connecting to Dot Pad over USB " + usbDevice.getDeviceName());
+    connectionCallback = callback;
+    connectedNotified = false;
+    disconnectTransport();
+    resetLinkState(/* keepPage= */ false);
+    transport = usbTransport;
+    usbTransport.connect(usbDevice, transportCallback);
+  }
+
+  private void disconnectTransport() {
+    DotPadTransport current = transport;
+    transport = null;
+    if (current != null) {
+      current.disconnect();
+    }
   }
 
   /** Disconnects the active Dot Pad connection. Main thread only. */
@@ -215,7 +256,7 @@ public class DotPadDriver implements Encoder {
     BrailleDisplayLog.d(TAG, "Disconnecting Dot Pad");
     connectionCallback = null;
     connectedNotified = false;
-    transport.disconnect();
+    disconnectTransport();
     resetLinkState(/* keepPage= */ false);
   }
 
@@ -289,7 +330,7 @@ public class DotPadDriver implements Encoder {
 
   @Override
   public void consumePacketFromDevice(byte[] packet) {
-    // Incoming bytes arrive through DotPadBleTransport, not D2dConnection.
+    // Incoming bytes arrive through the DotPadTransport, not D2dConnection.
   }
 
   @Override
@@ -314,7 +355,7 @@ public class DotPadDriver implements Encoder {
 
   @Override
   public BiPredicate<Integer, Integer> getDeviceVendorProdIdFilter() {
-    return (vendorId, prodId) -> false;
+    return DotPadDriver::isDotPadUsbId;
   }
 
   private int graphicColumns() {
@@ -385,7 +426,7 @@ public class DotPadDriver implements Encoder {
             GRAPHIC_FIRST_LINE_ID + firstLine, startCell, endCell, inFlightLines);
     BrailleDisplayLog.v(TAG, "Writing " + packet);
     mainHandler.postDelayed(lineTimeoutRunnable, lineTimeoutMs());
-    if (!transport.write(packet.toBytes())) {
+    if (!write(packet)) {
       BrailleDisplayLog.w(TAG, "Transport not ready; dropping write");
       finishWrite(/* displayed= */ false);
     }
@@ -570,16 +611,21 @@ public class DotPadDriver implements Encoder {
 
   // ---- Transport callbacks (main thread) ----
 
-  private final DotPadBleTransport.Callback transportCallback =
-      new DotPadBleTransport.Callback() {
+  private boolean write(DotPadPacket packet) {
+    DotPadTransport current = transport;
+    return current != null && current.write(packet.toBytes());
+  }
+
+  private final DotPadTransport.Callback transportCallback =
+      new DotPadTransport.Callback() {
         @Override
         public void onConnected() {
           BrailleDisplayLog.d(TAG, "Link up; requesting board information");
           resetLinkState(/* keepPage= */ true);
           mainHandler.postDelayed(boardInfoTimeoutRunnable, BOARD_INFO_TIMEOUT_MS);
-          transport.write(DotPadPacket.request(DotPadPacket.REQ_BOARD_INFORMATION).toBytes());
-          transport.write(DotPadPacket.request(DotPadPacket.REQ_DEVICE_NAME).toBytes());
-          transport.write(DotPadPacket.request(DotPadPacket.REQ_FIRMWARE_VERSION).toBytes());
+          write(DotPadPacket.request(DotPadPacket.REQ_BOARD_INFORMATION));
+          write(DotPadPacket.request(DotPadPacket.REQ_DEVICE_NAME));
+          write(DotPadPacket.request(DotPadPacket.REQ_FIRMWARE_VERSION));
         }
 
         @Override
@@ -597,6 +643,7 @@ public class DotPadDriver implements Encoder {
           ConnectionCallback cb = connectionCallback;
           connectionCallback = null;
           connectedNotified = false;
+          transport = null;
           resetLinkState(/* keepPage= */ false);
           if (cb != null) {
             cb.onDisconnected();
@@ -608,6 +655,7 @@ public class DotPadDriver implements Encoder {
           ConnectionCallback cb = connectionCallback;
           connectionCallback = null;
           connectedNotified = false;
+          transport = null;
           resetLinkState(/* keepPage= */ false);
           if (cb != null) {
             cb.onConnectFailure(exception);

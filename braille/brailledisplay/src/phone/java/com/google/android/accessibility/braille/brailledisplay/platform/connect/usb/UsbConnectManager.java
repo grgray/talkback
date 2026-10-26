@@ -36,6 +36,8 @@ import com.google.android.accessibility.braille.brailledisplay.platform.connect.
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.D2dConnection;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableUsbDevice;
+import com.google.android.accessibility.braille.brailledisplay.platform.connect.dotpad.DotPadConnector;
+import com.google.android.accessibility.braille.brailledisplay.platform.connect.dotpad.DotPadDriver;
 import com.google.android.accessibility.braille.brailledisplay.platform.lib.BatteryChangeReceiver;
 import com.google.android.accessibility.braille.brailledisplay.platform.lib.ScreenUnlockReceiver;
 import com.google.android.accessibility.braille.brailledisplay.settings.BrailleDisplaySettingsActivity;
@@ -89,6 +91,29 @@ public class UsbConnectManager extends ConnectManager {
           connectManagerCallback.onConnectStarted(/* initial= */ false, ConnectStage.BRLTTY);
           deviceConnection = new UsbConnection(device);
           connectManagerCallback.onConnected(ConnectStage.HID, deviceConnection);
+        }
+      };
+
+  /** Dot Pad displays are driven by DotPadDriver over their USB serial chip, not by BRLTTY. */
+  private final Connector.Callback dotPadConnectorCallback =
+      new Connector.Callback() {
+        @Override
+        public void onConnectSuccess(D2dConnection connection) {
+          deviceConnection = connection;
+          connectManagerCallback.onConnectStarted(/* initial= */ false, ConnectStage.BRLTTY);
+          connectManagerCallback.onConnected(ConnectStage.SERIAL, connection);
+        }
+
+        @Override
+        public void onDisconnected() {
+          disconnect();
+        }
+
+        @Override
+        public void onConnectFailure(ConnectableDevice device, Exception exception) {
+          BrailleDisplayLog.d(TAG, "Dot Pad usb onConnectFailure: " + exception.getMessage());
+          disconnect();
+          connectManagerCallback.onConnectFailure(device, ConnectStage.SERIAL, exception);
         }
       };
 
@@ -298,7 +323,12 @@ public class UsbConnectManager extends ConnectManager {
   private void internalConnect(UsbDevice device) {
     ConnectableDevice connectableDevice =
         ConnectableUsbDevice.builder().setUsbDevice(device).build();
-    if (BuildVersionUtils.isAtLeastV() && useHid(context, connectableDevice)) {
+    if (DotPadDriver.isDotPadDevice(connectableDevice)) {
+      BrailleDisplayLog.i(TAG, "Connecting to Dot Pad over USB.");
+      connectManagerCallback.onConnectStarted(/* initial= */ true, ConnectStage.SERIAL);
+      usbConnector = new DotPadConnector(context, connectableDevice, dotPadConnectorCallback);
+      usbConnector.connect();
+    } else if (BuildVersionUtils.isAtLeastV() && useHid(context, connectableDevice)) {
       BrailleDisplayLog.i(TAG, "Braille HID is supported.");
       connectManagerCallback.onConnectStarted(/* initial= */ true, ConnectStage.HID);
       usbConnector =

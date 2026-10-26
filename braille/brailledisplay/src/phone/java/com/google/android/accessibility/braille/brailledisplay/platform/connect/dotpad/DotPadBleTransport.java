@@ -56,7 +56,7 @@ import java.util.function.Predicate;
  * callbacks are delivered on it.
  */
 @SuppressLint("MissingPermission") // TalkBack requests Bluetooth permissions before connecting.
-public class DotPadBleTransport {
+public class DotPadBleTransport implements DotPadTransport {
   private static final String TAG = "DotPadBleTransport";
 
   public static final UUID SERVICE_UUID = UUID.fromString("49535343-fe7d-4ae5-8fa9-9fafd205e455");
@@ -79,23 +79,6 @@ public class DotPadBleTransport {
   private static final int MAX_RECONNECT_ATTEMPTS = 5;
   /** Attempts for the first connection; Android often fails the first GATT connect (status 133). */
   private static final int MAX_INITIAL_CONNECT_ATTEMPTS = 3;
-
-  /** Connection lifecycle and incoming data. */
-  public interface Callback {
-    /** The link is up and notifications are enabled; also called after each reconnection. */
-    void onConnected();
-
-    /** An established link dropped and reconnection attempt {@code attempt} is starting. */
-    void onReconnecting(int attempt);
-
-    /** An established link dropped and could not be re-established. */
-    void onDisconnected();
-
-    /** The first connection could not be established. */
-    void onConnectFailure(Exception exception);
-
-    void onDataReceived(byte[] data);
-  }
 
   private final Context context;
   private final Handler handler;
@@ -216,13 +199,14 @@ public class DotPadBleTransport {
     openGatt();
   }
 
-  /** Closes the connection. No further callbacks are delivered. */
+  @Override
   public void disconnect() {
     callback = null;
     device = null;
     closeGatt();
   }
 
+  @Override
   public boolean isReady() {
     return ready;
   }
@@ -371,7 +355,7 @@ public class DotPadBleTransport {
 
   // ---- Writing ----
 
-  /** Queues {@code bytes} for sending. Returns false if the link is not ready. */
+  @Override
   public boolean write(byte[] bytes) {
     if (!ready) {
       return false;

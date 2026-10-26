@@ -22,11 +22,12 @@ import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayLog
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.Connector;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableBluetoothDevice;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
+import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableUsbDevice;
 import com.google.android.accessibility.braille.brailledisplay.platform.lib.Utils;
 
 /**
- * Sets up a Bluetooth Low Energy (BLE) connection to a Dot Pad braille display using {@link
- * DotPadDriver}.
+ * Sets up a connection to a Dot Pad braille display using {@link DotPadDriver}: over USB for a
+ * {@link ConnectableUsbDevice}, otherwise over Bluetooth Low Energy (BLE).
  */
 public class DotPadConnector extends Connector {
   private static final String TAG = "DotPadConnector";
@@ -47,9 +48,7 @@ public class DotPadConnector extends Connector {
     BrailleDisplayLog.d(TAG, "connect to DotPad: " + getDevice());
     disconnected = false;
     connectedNotified = false;
-    BluetoothDevice bluetoothDevice = ((ConnectableBluetoothDevice) getDevice()).bluetoothDevice();
-    driver.connect(
-        bluetoothDevice,
+    DotPadDriver.ConnectionCallback connectionCallback =
         new DotPadDriver.ConnectionCallback() {
           @Override
           public void onConnected() {
@@ -72,7 +71,7 @@ public class DotPadConnector extends Connector {
             if (disconnected) {
               return;
             }
-            BrailleDisplayLog.d(TAG, "DotPad BLE reconnecting (attempt " + attempt + ")");
+            BrailleDisplayLog.d(TAG, "DotPad reconnecting (attempt " + attempt + ")");
           }
 
           @Override
@@ -96,7 +95,14 @@ public class DotPadConnector extends Connector {
             connectedNotified = false;
             getConnectorCallback().onConnectFailure(getDevice(), exception);
           }
-        });
+        };
+    if (getDevice() instanceof ConnectableUsbDevice) {
+      driver.connectUsb(((ConnectableUsbDevice) getDevice()).usbDevice(), connectionCallback);
+    } else {
+      BluetoothDevice bluetoothDevice =
+          ((ConnectableBluetoothDevice) getDevice()).bluetoothDevice();
+      driver.connect(bluetoothDevice, connectionCallback);
+    }
   }
 
   @Override
