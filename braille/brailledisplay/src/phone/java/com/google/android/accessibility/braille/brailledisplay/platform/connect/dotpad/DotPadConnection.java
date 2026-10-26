@@ -50,7 +50,7 @@ public class DotPadConnection implements D2dConnection {
     if (isShutdown) {
       return;
     }
-    // DotPadDriver sends packets directly via DotPadProcess.
+    // DotPadDriver writes to the display through DotPadBleTransport.
   }
 
   @Override

@@ -18,7 +18,6 @@ package com.google.android.accessibility.braille.brailledisplay.platform.connect
 
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
-import com.dotincorp.sdk_v3.model.DotDevice;
 import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayLog;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.Connector;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableBluetoothDevice;
@@ -53,13 +52,13 @@ public class DotPadConnector extends Connector {
         bluetoothDevice,
         new DotPadDriver.ConnectionCallback() {
           @Override
-          public void onConnected(DotDevice dotDevice) {
+          public void onConnected() {
             if (disconnected) {
               BrailleDisplayLog.d(TAG, "Ignore onConnected after disconnect");
               return;
             }
             if (connectedNotified) {
-              BrailleDisplayLog.d(TAG, "DotPad reconnected via SDK; connection remains active");
+              BrailleDisplayLog.d(TAG, "DotPad reconnected; connection remains active");
               return;
             }
             connectedNotified = true;

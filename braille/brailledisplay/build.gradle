@@ -7,7 +7,7 @@ android {
 }
 
 dependencies {
-    implementation project(':dotpadsdk')
+    testImplementation 'junit:junit:4.13.2'
     implementation project(':proguard')
     implementation project(':utils')
     implementation project(':braillebrltty')
