@@ -583,6 +583,7 @@ public class TalkBackService extends AccessibilityServiceCompat
 
   /** Controller for speech feedback. */
   private SpeechControllerImpl speechController;
+  @Nullable private OtherScreenReaderMonitor otherScreenReaderMonitor;
 
   /** Controller for diagnostic overlay (developer mode). */
   private DiagnosticOverlayControllerImpl diagnosticOverlayController;
@@ -851,6 +852,10 @@ public class TalkBackService extends AccessibilityServiceCompat
     final long turningOffTime = System.currentTimeMillis();
     interruptAllFeedback(/* stopTtsSpeechCompletely= */ false);
     storeTalkBackUserUsage();
+    if (otherScreenReaderMonitor != null) {
+      otherScreenReaderMonitor.stop();
+      otherScreenReaderMonitor = null;
+    }
     if (pipeline != null) {
       pipeline.onUnbind(calculateFinalAnnouncementVolume(), disableTalkBackCompleteAction);
     }
@@ -1584,6 +1589,10 @@ public class TalkBackService extends AccessibilityServiceCompat
     // Handle any update actions.
     helper = new TalkBackUpdateHelper(this);
     helper.checkUpdate();
+
+    // Stay quiet while another screen reader is on, so the user hears only one.
+    otherScreenReaderMonitor = new OtherScreenReaderMonitor(this, speechController);
+    otherScreenReaderMonitor.start();
 
     compositor.handleEvent(Compositor.EVENT_SPOKEN_FEEDBACK_ON, talkbackOnEventId);
 

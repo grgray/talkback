@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+
+  <!-- Spoken when this TalkBack starts, or keeps running, while another screen reader is on. [CHAR LIMIT=NONE] -->
+  <string name="other_screen_reader_on"><xliff:g id="this_screen_reader">%1$s</xliff:g> is on, but <xliff:g id="other_screen_reader">%2$s</xliff:g> is also on. <xliff:g id="this_screen_reader">%1$s</xliff:g> will stay silent until <xliff:g id="other_screen_reader">%2$s</xliff:g> is turned off. To turn it off, hold both volume keys for 3 seconds.</string>
+
+  <!-- Spoken when the other screen reader has been turned off and this TalkBack speaks again. [CHAR LIMIT=NONE] -->
+  <string name="other_screen_reader_off"><xliff:g id="other_screen_reader">%1$s</xliff:g> is off. <xliff:g id="this_screen_reader">%2$s</xliff:g> is now speaking.</string>
+
+</resources>
