@@ -96,22 +96,25 @@ public class DotPadDriver implements Encoder {
     new KeyMapping(BrailleInputEvent.CMD_GLOBAL_BACK, "F4"),
     new KeyMapping(BrailleInputEvent.CMD_GLOBAL_HOME, "F1", "F2"),
     new KeyMapping(BrailleInputEvent.CMD_GLOBAL_NOTIFICATIONS, "F3", "F4"),
-    new KeyMapping(BrailleInputEvent.CMD_OPEN_TALKBACK_MENU, "F2", "F3"),
+    new KeyMapping(BrailleInputEvent.CMD_GLOBAL_RECENTS, "F2", "F3"),
     new KeyMapping(
         BrailleInputEvent.CMD_OPEN_TALKBACK_MENU,
         DotPadKeyDecoder.KEY_PAN_LEFT,
         DotPadKeyDecoder.KEY_PAN_RIGHT),
+    // Same as TalkBack's 3-finger swipe up and down: character, word, line, paragraph, headings, ...
+    new KeyMapping(BrailleInputEvent.CMD_PREVIOUS_READING_CONTROL, "F1", "F3"),
+    new KeyMapping(BrailleInputEvent.CMD_NEXT_READING_CONTROL, "F2", "F4"),
+    new KeyMapping(BrailleInputEvent.CMD_GLOBAL_RECENTS, "F1", "F4"),
+    new KeyMapping(BrailleInputEvent.CMD_NAV_TOP, DotPadKeyDecoder.KEY_PAN_LEFT, "F2"),
     new KeyMapping(
         BrailleInputEvent.CMD_NAVIGATE_BY_READING_GRANULARITY_OR_ADJUST_READING_CONTROL_BACKWARD,
-        "F1",
-        "F3"),
+        DotPadKeyDecoder.KEY_PAN_LEFT,
+        "F1"),
+    new KeyMapping(BrailleInputEvent.CMD_NAV_BOTTOM, DotPadKeyDecoder.KEY_PAN_RIGHT, "F3"),
     new KeyMapping(
         BrailleInputEvent.CMD_NAVIGATE_BY_READING_GRANULARITY_OR_ADJUST_READING_CONTROL_FORWARD,
-        "F2",
+        DotPadKeyDecoder.KEY_PAN_RIGHT,
         "F4"),
-    new KeyMapping(BrailleInputEvent.CMD_GLOBAL_RECENTS, "F1", "F4"),
-    new KeyMapping(BrailleInputEvent.CMD_NAV_TOP, DotPadKeyDecoder.KEY_PAN_LEFT, "F1"),
-    new KeyMapping(BrailleInputEvent.CMD_NAV_BOTTOM, DotPadKeyDecoder.KEY_PAN_RIGHT, "F4"),
   };
 
   /** Listener for BLE scan results. */
