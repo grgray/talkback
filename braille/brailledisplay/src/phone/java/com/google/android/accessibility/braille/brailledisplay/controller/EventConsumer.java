@@ -41,4 +41,20 @@ interface EventConsumer {
 
   /** Called when the value of a reading control changes. */
   default void onReadingControlValueChanged() {}
+
+  /**
+   * Called when the user pans back. Returns {@code true} if the consumer handled it, or {@code
+   * false} for the default panning.
+   */
+  default boolean onPanUp() {
+    return false;
+  }
+
+  /**
+   * Called when the user pans forward. Returns {@code true} if the consumer handled it, or {@code
+   * false} for the default panning.
+   */
+  default boolean onPanDown() {
+    return false;
+  }
 }

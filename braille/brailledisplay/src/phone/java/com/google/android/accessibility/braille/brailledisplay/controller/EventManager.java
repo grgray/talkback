@@ -194,12 +194,12 @@ public class EventManager implements EventConsumer {
       return true;
     }
     if (shouldPanUp(command)) {
-      if (behaviorNavigation.panUp()) {
+      if (currentConsumer.onPanUp() || behaviorNavigation.panUp()) {
         return true;
       }
       feedbackManager.emitFeedback(FeedbackManager.Type.NAVIGATE_OUT_OF_BOUNDS);
     } else if (shouldPanDown(command)) {
-      if (behaviorNavigation.panDownWhenAutoScrollDisabled()) {
+      if (currentConsumer.onPanDown() || behaviorNavigation.panDownWhenAutoScrollDisabled()) {
         return true;
       }
       feedbackManager.emitFeedback(FeedbackManager.Type.NAVIGATE_OUT_OF_BOUNDS);

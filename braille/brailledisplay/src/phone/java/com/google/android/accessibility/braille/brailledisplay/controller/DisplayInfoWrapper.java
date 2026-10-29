@@ -37,6 +37,17 @@ public class DisplayInfoWrapper {
     reset();
   }
 
+  /**
+   * Renews the {@link DisplayInfo} data with new parameters. {@code panTextPosition} is used by
+   * {@link CellsContent#PAN_TEXT_POSITION}.
+   */
+  public void renewDisplayInfo(
+      CharSequence text, int panStrategy, int panTextPosition, boolean isSplitParagraphs) {
+    displayInfo =
+        contentHelper.generateDisplayInfo(text, panStrategy, panTextPosition, isSplitParagraphs);
+    reset();
+  }
+
   /** Renews the {@link DisplayInfo} data with new parameters. */
   public void renewDisplayInfo(
       int panStrategy,

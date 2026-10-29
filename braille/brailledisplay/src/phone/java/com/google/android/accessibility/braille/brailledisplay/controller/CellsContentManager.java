@@ -166,11 +166,16 @@ public class CellsContentManager implements CellsContentConsumer {
     Preconditions.checkNotNull(content, "content can't be null");
     Preconditions.checkNotNull(content.getText(), "content text is null");
     commonDisplayInfoWrapper.renewDisplayInfo(
-        content.getText(), content.getPanStrategy(), content.isSplitParagraphs());
+        content.getText(),
+        content.getPanStrategy(),
+        content.getPanTextPosition(),
+        content.isSplitParagraphs());
     BrailleDisplayAnalytics.getInstance(context)
         .logReadingBrailleCharacter(
             commonDisplayInfoWrapper.getDisplayInfo().displayedBraille().array().length);
-    if (reason == Reason.NAVIGATE_TO_NEW_NODE && panUpOverflow) {
+    if (reason == Reason.NAVIGATE_TO_NEW_NODE
+        && panUpOverflow
+        && content.getPanStrategy() != CellsContent.PAN_TEXT_POSITION) {
       refreshToTail();
     } else {
       refresh();
@@ -259,6 +264,14 @@ public class CellsContentManager implements CellsContentConsumer {
     }
   }
 
+  @Override
+  public int getDisplayStartTextPosition() {
+    if (getCurrentDisplayInfoWrapper() != commonDisplayInfoWrapper) {
+      return NO_CURSOR;
+    }
+    return commonDisplayInfoWrapper.getContentHelper().getDisplayStartTextPosition();
+  }
+
   /** Checks whether split point exists. */
   public boolean hasSplitPoints() {
     return editingWrapStrategy.hasSplitPoints();
@@ -334,6 +347,7 @@ public class CellsContentManager implements CellsContentConsumer {
    * Returns {@code true} if panning the displayed info up successfully, {@code false} if reach to
    * the end.
    */
+  @Override
   @CanIgnoreReturnValue
   public boolean panUp() {
     DisplayInfoWrapper displayInfoWrapper = getCurrentDisplayInfoWrapper();
@@ -356,6 +370,7 @@ public class CellsContentManager implements CellsContentConsumer {
    * Returns {@code true} if panning the displayed info down successfully, {@code false} if reach to
    * the end.
    */
+  @Override
   @CanIgnoreReturnValue
   public boolean panDown() {
     DisplayInfoWrapper displayInfoWrapper = getCurrentDisplayInfoWrapper();

@@ -59,11 +59,22 @@ public class CellsContent {
    */
   public static final int PAN_KEEP = 2;
 
+  /**
+   * Pan strategy that starts the display on the line beginning at the text position set with
+   * {@link #setPanTextPosition}. Used to keep the same lines on the display when multi-line reading
+   * moves focus to the item on the top line.
+   */
+  public static final int PAN_TEXT_POSITION = 3;
+
+  /** Pan strategy that shows the last full page of the content. */
+  public static final int PAN_LAST_PAGE = 4;
+
   /** Allow contraction, regardless of the presence of a selection span. */
   public static final int CONTRACT_ALWAYS_ALLOW = 1;
 
   private CharSequence text;
   private int panStrategy;
+  private int panTextPosition;
   private boolean splitParagraphs;
 
   /** Shortcut to just set text for a one-off use. */
@@ -97,6 +108,21 @@ public class CellsContent {
 
   public int getPanStrategy() {
     return panStrategy;
+  }
+
+  /**
+   * Sets the text position for {@link #PAN_TEXT_POSITION}, and sets that pan strategy. The display
+   * starts on the line beginning at this position.
+   */
+  @CanIgnoreReturnValue
+  public CellsContent setPanTextPosition(int textPosition) {
+    panStrategy = PAN_TEXT_POSITION;
+    panTextPosition = textPosition;
+    return this;
+  }
+
+  public int getPanTextPosition() {
+    return panTextPosition;
   }
 
   @CanIgnoreReturnValue

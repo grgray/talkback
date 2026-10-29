@@ -339,6 +339,22 @@ public abstract class WrapStrategy {
   }
 
   /**
+   * Pans the display so that it shows the last full page of the content: the last {@link
+   * #displayRows} lines, ending at the end of the content.
+   */
+  public void panToLastPage() {
+    if (!isValid) {
+      return;
+    }
+    int lastLineIndex = lineBreaks.size() - 1;
+    if (lastLineIndex < 1) {
+      return;
+    }
+    displayStart = lineBreaks.keyAt(Math.max(0, lastLineIndex - displayRows));
+    displayEnd = lineBreaks.keyAt(lastLineIndex);
+  }
+
+  /**
    * Moves the display starting and ending positions to the left of the current content.
    *
    * @return {@code true} if the display was panned, or {@code false} if it's at the left edge.

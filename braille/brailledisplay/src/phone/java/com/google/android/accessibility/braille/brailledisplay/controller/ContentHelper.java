@@ -65,6 +65,8 @@ public class ContentHelper {
 
   private CharSequence originalText;
   private boolean isSplitParagraphs;
+  /** Text position used by {@link CellsContent#PAN_TEXT_POSITION}. */
+  private int panTextPosition = NO_CURSOR;
   private final TranslatorManager translatorManager;
   private final WrapStrategyRetriever wrapStrategyRetriever;
 
@@ -86,7 +88,17 @@ public class ContentHelper {
   /** Generates display info needed by a displayer. */
   public DisplayInfo generateDisplayInfo(
       CharSequence text, int panStrategy, boolean isSplitParagraphs) {
+    return generateDisplayInfo(text, panStrategy, NO_CURSOR, isSplitParagraphs);
+  }
+
+  /**
+   * Generates display info needed by a displayer. {@code panTextPosition} is used by {@link
+   * CellsContent#PAN_TEXT_POSITION}.
+   */
+  public DisplayInfo generateDisplayInfo(
+      CharSequence text, int panStrategy, int panTextPosition, boolean isSplitParagraphs) {
     originalText = text;
+    this.panTextPosition = panTextPosition;
     TranslationResult translationResult =
         translatorManager.getOutputTranslator().translate(text, NO_CURSOR);
     SpannableStringBuilder spannableStringBuilder = new SpannableStringBuilder(text);
@@ -133,7 +145,9 @@ public class ContentHelper {
     overlaidBrailleContent = new BrailleWord(brailleContent);
     markSelection(selection.start, selection.end);
     wrapStrategy.setContent(isSplitParagraphs, translationResult, beginningOfInput, endOfInput);
-    if (newPanPosition >= 0) {
+    if (panStrategy == CellsContent.PAN_LAST_PAGE) {
+      wrapStrategy.panToLastPage();
+    } else if (newPanPosition >= 0) {
       wrapStrategy.panTo(newPanPosition, /* fix= */ false);
     } else {
       wrapStrategy.panTo(selection.end, /* fix= */ true);
@@ -188,6 +202,18 @@ public class ContentHelper {
       return null;
     }
     return generateDisplayInfo(originalText, CellsContent.PAN_KEEP, isSplitParagraphs);
+  }
+
+  /**
+   * Returns the text position of the first cell on the display, or {@code NO_CURSOR} if there is no
+   * content.
+   */
+  public int getDisplayStartTextPosition() {
+    if (currentTranslationResult == null) {
+      return NO_CURSOR;
+    }
+    return displayToTextPosition(
+        currentTranslationResult, wrapStrategyRetriever.getWrapStrategy().getDisplayStart());
   }
 
   /** Gets the text position of given byte position. */
@@ -470,7 +496,9 @@ public class ContentHelper {
                   oldDisplayPosition);
         }
       }
-      case CellsContent.PAN_CURSOR -> {}
+      case CellsContent.PAN_TEXT_POSITION ->
+          panPosition = textToDisplayPosition(newTranslationResult, panTextPosition);
+      case CellsContent.PAN_CURSOR, CellsContent.PAN_LAST_PAGE -> {}
       default -> BrailleDisplayLog.e(TAG, "Unknown pan strategy: " + panStrategy);
     }
     return panPosition;

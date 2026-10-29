@@ -128,6 +128,7 @@ import android.text.style.ClickableSpan;
 import android.text.style.URLSpan;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import androidx.annotation.Nullable;
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayImeUnavailableActivity;
 import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayLog;
@@ -143,6 +144,7 @@ import com.google.android.accessibility.braille.brailledisplay.controller.CellsC
 import com.google.android.accessibility.braille.brailledisplay.platform.PersistentStorage;
 import com.google.android.accessibility.braille.brailledisplay.settings.BrailleDisplaySettingsActivity;
 import com.google.android.accessibility.braille.brailledisplay.settings.KeyBindingsActivity;
+import com.google.android.accessibility.braille.brltty.BrailleDisplayProperties;
 import com.google.android.accessibility.braille.brltty.BrailleInputEvent;
 import com.google.android.accessibility.braille.common.BrailleCommonTalkBackSpeaker;
 import com.google.android.accessibility.braille.common.BrailleUserPreferences;
@@ -177,6 +179,18 @@ class DefaultConsumer implements EventConsumer {
   private final BehaviorDisplayer behaviorDisplayer;
   private final BehaviorIme behaviorIme;
   private final AccessibilityNodeInfoRef lastFocusedNode = new AccessibilityNodeInfoRef();
+  private final MultiLineReader multiLineReader;
+  /** Text of the content multi-line reading last set, or {@code null} if it is not in use. */
+  @Nullable private CharSequence multiLineText;
+  /**
+   * Item that panning moved focus to, so that the display can keep the same lines when focus
+   * arrives on it.
+   */
+  @Nullable private AccessibilityNodeInfoCompat panFocusNode;
+  /** Text position, within {@link #panFocusNode}'s text, of the top line on the display. */
+  private int panFocusOffset;
+  /** Whether to show the last page of the next item focused, after panning back onto it. */
+  private boolean showEndOfNextFocus;
   private final Handler loggingHandler;
   private AlertDialog turnOffBdDialog;
   private AlertDialog browseModeDialog;
@@ -197,6 +211,7 @@ class DefaultConsumer implements EventConsumer {
     this.behaviorIme = behaviorIme;
     this.cellsContentConsumer = cellsContentConsumer;
     this.nodeBrailler = new NodeBrailler(context, behaviorNodeText);
+    this.multiLineReader = new MultiLineReader(nodeBrailler, behaviorFocus);
     this.feedbackManager = feedbackManager;
     loggingHandler = new LoggingHandler(context);
   }
@@ -217,6 +232,9 @@ class DefaultConsumer implements EventConsumer {
   @Override
   public boolean onMappedInputEvent(BrailleInputEvent event) {
     BrailleDisplayLog.v(TAG, "onMappedInputEvent: " + event.getCommand());
+    // Any other command starts reading afresh from wherever focus lands.
+    panFocusNode = null;
+    showEndOfNextFocus = false;
     // Switch to the braille display keyboard when typing on the braille display and braille
     // keyboard is not default anytime.
     if (isTriggerImeSwitchCommands(event)) {
@@ -638,7 +656,96 @@ class DefaultConsumer implements EventConsumer {
   }
 
   @Override
+  public boolean onPanUp() {
+    if (multiLineText == null || cellsContentConsumer.isTimedMessageDisplaying()) {
+      return false;
+    }
+    panFocusNode = null;
+    if (cellsContentConsumer.panUp()) {
+      focusItemOnTopLine();
+      return true;
+    }
+    // At the start of the first item: show the page of items just before it.
+    MultiLineReader.Item first = MultiLineReader.findFirstItem(multiLineText);
+    BrailleDisplayProperties props = behaviorDisplayer.getDeviceProperties();
+    CellsContent before =
+        first == null
+            ? null
+            : multiLineReader.brailleBefore(
+                first.node, props.getNumTextCells(), props.getNumTextRows());
+    if (before == null) {
+      // Nothing found before it on screen. TalkBack's previous item can scroll; show the end of
+      // whatever it moves to.
+      if (behaviorScreenReaderAction.performAction(ScreenReaderAction.PREVIOUS_ITEM)) {
+        showEndOfNextFocus = true;
+        return true;
+      }
+      return false;
+    }
+    multiLineText = before.getText();
+    cellsContentConsumer.setContent(before, Reason.PAN_TO_PREVIOUS_ITEMS);
+    focusItemOnTopLine();
+    return true;
+  }
+
+  @Override
+  public boolean onPanDown() {
+    if (multiLineText == null || cellsContentConsumer.isTimedMessageDisplaying()) {
+      return false;
+    }
+    panFocusNode = null;
+    if (cellsContentConsumer.panDown()) {
+      focusItemOnTopLine();
+      return true;
+    }
+    // Everything on the display has been read: go on to the item after the last one.
+    MultiLineReader.Item last = MultiLineReader.findLastItem(multiLineText);
+    AccessibilityNodeInfoCompat focused = getFocusedNode(/* fallbackOnRoot= */ false);
+    if (last == null || last.node.equals(focused)) {
+      // The default panning moves to the next item, which can scroll.
+      return false;
+    }
+    AccessibilityNodeInfoCompat next = multiLineReader.findNext(last.node);
+    if (next != null) {
+      return PerformActionUtils.performAction(
+          next, AccessibilityNodeInfoCompat.ACTION_ACCESSIBILITY_FOCUS, /* eventId= */ null);
+    }
+    // Nothing after it on screen: focus it, so that TalkBack's next item scrolls on from there.
+    PerformActionUtils.performAction(
+        last.node, AccessibilityNodeInfoCompat.ACTION_ACCESSIBILITY_FOCUS, /* eventId= */ null);
+    return behaviorScreenReaderAction.performAction(ScreenReaderAction.NEXT_ITEM);
+  }
+
+  /**
+   * Moves focus to the item on the display's top line, if it isn't focused already. The display
+   * keeps the same lines when focus arrives there.
+   */
+  private void focusItemOnTopLine() {
+    int position = cellsContentConsumer.getDisplayStartTextPosition();
+    MultiLineReader.Item item =
+        position == NO_CURSOR ? null : MultiLineReader.findItemAt(multiLineText, position);
+    if (item == null || item.node.equals(getFocusedNode(/* fallbackOnRoot= */ false))) {
+      return;
+    }
+    panFocusNode = item.node;
+    panFocusOffset = Math.max(0, position - item.start);
+    if (!PerformActionUtils.performAction(
+        item.node, AccessibilityNodeInfoCompat.ACTION_ACCESSIBILITY_FOCUS, /* eventId= */ null)) {
+      panFocusNode = null;
+    }
+  }
+
+  /** Returns whether the display has more than one line, so multi-line reading is used. */
+  private boolean isMultiLineDisplay() {
+    BrailleDisplayProperties props = behaviorDisplayer.getDeviceProperties();
+    return props != null && props.getNumTextRows() > 1;
+  }
+
+  @Override
   public void onDeactivate() {
+    multiLineText = null;
+    panFocusNode = null;
+    showEndOfNextFocus = false;
     if (turnOffBdDialog != null) {
       turnOffBdDialog.dismiss();
     }
@@ -797,7 +904,31 @@ class DefaultConsumer implements EventConsumer {
   private boolean brailleFocusedNodeAndEvent(Reason reason, AccessibilityEvent event) {
     AccessibilityNodeInfoCompat focused = getFocusedNode(/* fallbackOnRoot= */ false);
     if (focused != null) {
-      CellsContent content = nodeBrailler.brailleNodeAndEvent(focused, event);
+      CellsContent content;
+      if (isMultiLineDisplay()) {
+        BrailleDisplayProperties props = behaviorDisplayer.getDeviceProperties();
+        if (showEndOfNextFocus && reason == Reason.NAVIGATE_TO_NEW_NODE) {
+          // Panned back onto this item: show its last page, without the items after it.
+          content =
+              multiLineReader
+                  .brailleFrom(focused, event, props.getNumTextCells(), /* rows= */ 0)
+                  .setPanStrategy(CellsContent.PAN_LAST_PAGE);
+          showEndOfNextFocus = false;
+        } else {
+          content =
+              multiLineReader.brailleFrom(
+                  focused, event, props.getNumTextCells(), props.getNumTextRows());
+        }
+        if (focused.equals(panFocusNode)) {
+          // Panning moved focus here: keep the lines that are on the display.
+          content.setPanTextPosition(panFocusOffset);
+          panFocusNode = null;
+        }
+        multiLineText = content.getText();
+      } else {
+        content = nodeBrailler.brailleNodeAndEvent(focused, event);
+        multiLineText = null;
+      }
       if (focused.equals(lastFocusedNode.get())
           && (content.getPanStrategy() == CellsContent.PAN_RESET)) {
         content.setPanStrategy(CellsContent.PAN_KEEP);
@@ -831,6 +962,7 @@ class DefaultConsumer implements EventConsumer {
         content.setPanStrategy(CellsContent.PAN_KEEP);
       }
       lastFocusedNode.clear();
+      multiLineText = null;
       cellsContentConsumer.setContent(content, reason);
     }
   }

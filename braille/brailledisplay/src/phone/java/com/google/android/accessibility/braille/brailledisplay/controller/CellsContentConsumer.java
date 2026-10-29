@@ -29,6 +29,8 @@ public interface CellsContentConsumer {
     NAVIGATE_TO_NEW_NODE,
     WINDOW_CHANGED,
     SCREEN_OFF,
+    /** Multi-line reading panned past the start of the first item on the display. */
+    PAN_TO_PREVIOUS_ITEMS,
   }
 
   /** Sets common content. */
@@ -57,4 +59,22 @@ public interface CellsContentConsumer {
 
   /** Returns whether caption is displaying. */
   boolean isCaptionShowing();
+
+  /**
+   * Pans the display back one page. Returns {@code false} if the common content is already at its
+   * start.
+   */
+  boolean panUp();
+
+  /**
+   * Pans the display forward one page. Returns {@code false} if the common content is already at
+   * its end.
+   */
+  boolean panDown();
+
+  /**
+   * Returns the text position, in the common content, of the first cell on the display, or {@code
+   * NO_CURSOR} if a timed message is showing or there is no content.
+   */
+  int getDisplayStartTextPosition();
 }
