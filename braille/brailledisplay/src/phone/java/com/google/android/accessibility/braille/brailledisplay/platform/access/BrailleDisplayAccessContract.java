@@ -72,7 +72,8 @@ public final class BrailleDisplayAccessContract {
 
   /**
    * Reply to {@link #MSG_QUERY_DISPLAY}. {@code arg1} is 1 if TalkBack is using (or has lent) a
-   * display, described by the data {@link android.os.Bundle}, or 0 if not.
+   * display, or remembers one it used before (see {@link #KEY_REMEMBERED}), described by the data
+   * {@link android.os.Bundle}; 0 if not.
    */
   public static final int MSG_DISPLAY_INFO = 104;
 
@@ -97,6 +98,12 @@ public final class BrailleDisplayAccessContract {
 
   /** Boolean: true if TalkBack is connected to the display now (false if lent or connecting). */
   public static final String KEY_CONNECTED_TO_TALKBACK = "connected_to_talkback";
+
+  /**
+   * Boolean: true if TalkBack has no display connected and this is the one it used most recently.
+   * It may be switched off or out of range.
+   */
+  public static final String KEY_REMEMBERED = "remembered";
 
   public static final String TRANSPORT_BLUETOOTH = "bluetooth";
   public static final String TRANSPORT_USB = "usb";

@@ -29,6 +29,7 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.Messenger;
 import android.os.RemoteException;
+import android.util.Pair;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
@@ -36,6 +37,7 @@ import androidx.annotation.Nullable;
 import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayLog;
 import com.google.android.accessibility.braille.brailledisplay.R;
 import com.google.android.accessibility.braille.brailledisplay.platform.Connectioneer;
+import com.google.android.accessibility.braille.brailledisplay.platform.PersistentStorage;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableUsbDevice;
 import com.google.android.accessibility.braille.common.BrailleCommonTalkBackSpeaker;
@@ -213,7 +215,7 @@ public final class BrailleDisplayLeaseManager {
       // Repeated request from the current holder.
       if (state == State.GRANTED) {
         request.send(
-            BrailleDisplayAccessContract.MSG_ACCESS_GRANTED, grantedArg(), describe(releasedDevice));
+            BrailleDisplayAccessContract.MSG_ACCESS_GRANTED, grantedArg(), describeForApp(releasedDevice));
       }
       cancelGrace();
       return;
@@ -254,11 +256,36 @@ public final class BrailleDisplayLeaseManager {
       device = connectioneer.getConnectingOrConnectedDevice().orElse(null);
       connectedToTalkBack = device != null && connectioneer.isConnected();
     }
-    Bundle data = describe(device);
+    Bundle data = describeForApp(device);
     if (data != null) {
       data.putBoolean(BrailleDisplayAccessContract.KEY_CONNECTED_TO_TALKBACK, connectedToTalkBack);
     }
     asker.send(BrailleDisplayAccessContract.MSG_DISPLAY_INFO, data != null ? 1 : 0, data);
+  }
+
+  /**
+   * Describes {@code device}, or if it is null the display TalkBack used most recently, so an app
+   * can connect to it without scanning.
+   */
+  @Nullable
+  private Bundle describeForApp(@Nullable ConnectableDevice device) {
+    if (device != null) {
+      return describe(device);
+    }
+    // TalkBack remembers Bluetooth displays only, most recent first.
+    List<Pair<String, String>> remembered = PersistentStorage.getRememberedDevices(context);
+    if (remembered.isEmpty()) {
+      return null;
+    }
+    Pair<String, String> latest = remembered.get(0);
+    Bundle data = new Bundle();
+    data.putString(BrailleDisplayAccessContract.KEY_DISPLAY_NAME, latest.first);
+    data.putString(
+        BrailleDisplayAccessContract.KEY_TRANSPORT,
+        BrailleDisplayAccessContract.TRANSPORT_BLUETOOTH);
+    data.putString(BrailleDisplayAccessContract.KEY_BLUETOOTH_ADDRESS, latest.second);
+    data.putBoolean(BrailleDisplayAccessContract.KEY_REMEMBERED, true);
+    return data;
   }
 
   /** Describes {@code device} so an app can connect to it without scanning. */
@@ -329,7 +356,7 @@ public final class BrailleDisplayLeaseManager {
     state = State.GRANTED;
     BrailleDisplayLog.d(TAG, "Display lent to " + lease.packageName);
     lease.send(
-        BrailleDisplayAccessContract.MSG_ACCESS_GRANTED, grantedArg(), describe(releasedDevice));
+        BrailleDisplayAccessContract.MSG_ACCESS_GRANTED, grantedArg(), describeForApp(releasedDevice));
     // The app may have left the foreground while TalkBack was letting go.
     onForegroundMaybeChanged();
   }
