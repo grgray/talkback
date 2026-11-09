@@ -822,6 +822,12 @@
   <string name="bd_access_lent">Braille display in use by <xliff:g id="app_name" example="Dot Pad Demo">%1$s</xliff:g></string>
   <!-- Spoken when TalkBack takes the braille display back from another app. [CHAR_LIMIT=NONE] -->
   <string name="bd_access_returned">Braille display returned to TalkBack</string>
+  <!-- Spoken when TalkBack lends the braille display to whatever connects next, such as a web page. [CHAR_LIMIT=NONE] -->
+  <string name="bd_access_lent_open">Braille display lent. Choose it from the list of devices to connect.</string>
+  <!-- Spoken when TalkBack has selected the lent braille display in a browser's list of devices, and moved focus to the button that connects it. [CHAR_LIMIT=NONE] -->
+  <string name="bd_access_display_selected"><xliff:g id="display_name" example="DotPad320X_1015">%1$s</xliff:g> selected. Double-tap Pair to connect.</string>
+  <!-- Name used for a braille display whose own name is not known, in bd_access_display_selected. [CHAR_LIMIT=40] -->
+  <string name="bd_access_display_generic_name">Braille display</string>
   <!-- Label of the permission that lets an app borrow the braille display from TalkBack. [CHAR_LIMIT=NONE] -->
   <string name="bd_access_permission_label">use the braille display</string>
   <!-- Description of the permission that lets an app borrow the braille display from TalkBack. [CHAR_LIMIT=NONE] -->

@@ -63,6 +63,7 @@ import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_HEADING_PREVIOUS;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_HELP;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_KEY_ENTER;
+import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_LEND_BRAILLE_DISPLAY;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_LINK_NEXT;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_LINK_NEXT_IN_BROWSE;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_LINK_PREVIOUS;
@@ -90,6 +91,7 @@ import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_RADIO_BUTTON_NEXT_IN_BROWSE;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_RADIO_BUTTON_PREVIOUS;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_ROUTE;
+import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_SHOW_TACTILE_GRAPHIC;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_SCROLL_BACKWARD;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_SCROLL_FORWARD;
 import static com.google.android.accessibility.braille.brltty.BrailleInputEvent.CMD_STOP_READING;
@@ -142,6 +144,7 @@ import com.google.android.accessibility.braille.brailledisplay.controller.BdCont
 import com.google.android.accessibility.braille.brailledisplay.controller.BdController.BehaviorScreenReader;
 import com.google.android.accessibility.braille.brailledisplay.controller.CellsContentConsumer.Reason;
 import com.google.android.accessibility.braille.brailledisplay.platform.PersistentStorage;
+import com.google.android.accessibility.braille.brailledisplay.platform.access.BrailleDisplayLeaseManager;
 import com.google.android.accessibility.braille.brailledisplay.settings.BrailleDisplaySettingsActivity;
 import com.google.android.accessibility.braille.brailledisplay.settings.KeyBindingsActivity;
 import com.google.android.accessibility.braille.brltty.BrailleDisplayProperties;
@@ -180,6 +183,7 @@ class DefaultConsumer implements EventConsumer {
   private final BehaviorIme behaviorIme;
   private final AccessibilityNodeInfoRef lastFocusedNode = new AccessibilityNodeInfoRef();
   private final MultiLineReader multiLineReader;
+  private final TactileGraphicsDrawer tactileGraphicsDrawer;
   /** Text of the content multi-line reading last set, or {@code null} if it is not in use. */
   @Nullable private CharSequence multiLineText;
   /**
@@ -213,6 +217,10 @@ class DefaultConsumer implements EventConsumer {
     this.nodeBrailler = new NodeBrailler(context, behaviorNodeText);
     this.multiLineReader = new MultiLineReader(nodeBrailler, behaviorFocus);
     this.feedbackManager = feedbackManager;
+    this.tactileGraphicsDrawer =
+        new TactileGraphicsDrawer(
+            behaviorScreenReaderAction::getAccessibilityService,
+            () -> feedbackManager.emitFeedback(FeedbackManager.Type.COMMAND_FAILED));
     loggingHandler = new LoggingHandler(context);
   }
 
@@ -267,6 +275,8 @@ class DefaultConsumer implements EventConsumer {
             CMD_KEY_ENTER,
             CMD_ACTIVATE_CURRENT ->
             success = behaviorScreenReaderAction.performAction(ScreenReaderAction.CLICK_CURRENT);
+        case CMD_LEND_BRAILLE_DISPLAY ->
+            success = BrailleDisplayLeaseManager.getInstance(context).lendToForegroundApp();
         case CMD_ROUTE -> {
           Optional<ClickableSpan[]> clickableSpans =
               cellsContentConsumer.getClickableSpans(event.getArgument());
@@ -292,6 +302,7 @@ class DefaultConsumer implements EventConsumer {
             }
           }
         }
+        case CMD_SHOW_TACTILE_GRAPHIC -> success = toggleTactileGraphic();
         case CMD_NEXT_READING_CONTROL ->
             success =
                 behaviorScreenReaderAction.performAction(ScreenReaderAction.NEXT_READING_CONTROL);
@@ -657,6 +668,8 @@ class DefaultConsumer implements EventConsumer {
 
   @Override
   public boolean onPanUp() {
+    // Panning leaves a drawn picture and goes back to reading braille.
+    tactileGraphicsDrawer.clear();
     if (multiLineText == null || cellsContentConsumer.isTimedMessageDisplaying()) {
       return false;
     }
@@ -690,6 +703,7 @@ class DefaultConsumer implements EventConsumer {
 
   @Override
   public boolean onPanDown() {
+    tactileGraphicsDrawer.clear();
     if (multiLineText == null || cellsContentConsumer.isTimedMessageDisplaying()) {
       return false;
     }
@@ -735,6 +749,38 @@ class DefaultConsumer implements EventConsumer {
     }
   }
 
+  /** Draws the focused item as a tactile graphic, or stops drawing it if it is drawn already. */
+  private boolean toggleTactileGraphic() {
+    AccessibilityNodeInfoCompat focused = getFocusedNode(/* fallbackOnRoot= */ false);
+    if (focused == null) {
+      return false;
+    }
+    if (tactileGraphicsDrawer.isDrawn(focused)) {
+      tactileGraphicsDrawer.clear();
+      return true;
+    }
+    tactileGraphicsDrawer.clear();
+    return tactileGraphicsDrawer.draw(focused);
+  }
+
+  /**
+   * Keeps the tactile graphic in step with focus: a picture marked by its author is drawn when
+   * focus moves to it, and a drawn picture is cleared when focus moves elsewhere.
+   */
+  private void updateTactileGraphic(AccessibilityNodeInfoCompat focused, Reason reason) {
+    if (tactileGraphicsDrawer.isDrawn(focused)) {
+      return;
+    }
+    if (tactileGraphicsDrawer.isDrawing()) {
+      tactileGraphicsDrawer.clear();
+    }
+    if (reason == Reason.NAVIGATE_TO_NEW_NODE
+        && tactileGraphicsDrawer.canDraw()
+        && TactileGraphicsDrawer.isMarked(focused)) {
+      tactileGraphicsDrawer.draw(focused);
+    }
+  }
+
   /** Returns whether the display has more than one line, so multi-line reading is used. */
   private boolean isMultiLineDisplay() {
     BrailleDisplayProperties props = behaviorDisplayer.getDeviceProperties();
@@ -746,6 +792,7 @@ class DefaultConsumer implements EventConsumer {
     multiLineText = null;
     panFocusNode = null;
     showEndOfNextFocus = false;
+    tactileGraphicsDrawer.clear();
     if (turnOffBdDialog != null) {
       turnOffBdDialog.dismiss();
     }
@@ -935,6 +982,7 @@ class DefaultConsumer implements EventConsumer {
       }
       cellsContentConsumer.setContent(content, reason);
       lastFocusedNode.reset(focused);
+      updateTactileGraphic(focused, reason);
       return true;
     }
     return false;

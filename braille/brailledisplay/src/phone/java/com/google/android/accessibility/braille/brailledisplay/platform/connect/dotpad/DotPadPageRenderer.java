@@ -63,6 +63,29 @@ public final class DotPadPageRenderer {
   }
 
   /**
+   * Renders a graphic onto a {@code physicalRows} x {@code physicalColumns} grid of graphic-mode
+   * cells, using every pin with no gaps. {@code pins} is {@code pinsWide} x {@code pinsHigh},
+   * row-major, {@code true} for raised; pins outside the grid are clipped.
+   */
+  public static byte[][] renderGraphic(
+      boolean[] pins, int pinsWide, int pinsHigh, int physicalColumns, int physicalRows) {
+    byte[][] physical = new byte[physicalRows][physicalColumns];
+    int width = Math.min(pinsWide, physicalColumns * PINS_PER_CELL_X);
+    int height = Math.min(pinsHigh, physicalRows * PINS_PER_CELL_Y);
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        int index = y * pinsWide + x;
+        if (index >= pins.length || !pins[index]) {
+          continue;
+        }
+        int bit = (y % PINS_PER_CELL_Y) + PINS_PER_CELL_Y * (x % PINS_PER_CELL_X);
+        physical[y / PINS_PER_CELL_Y][x / PINS_PER_CELL_X] |= (byte) (1 << bit);
+      }
+    }
+    return physical;
+  }
+
+  /**
    * Renders {@code brailleCells} (row-major, {@code logicalColumns} per line) onto a {@code
    * physicalRows} x {@code physicalColumns} grid of graphic-mode cells. Missing input cells are
    * blank; cells that fall outside the grid are clipped.

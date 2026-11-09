@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+
+  <!-- Shown in braille for a picture that can be felt on a braille display that draws tactile graphics. [CHAR LIMIT=30] -->
+  <string name="bd_tactile_graphic_label">tactile graphic</string>
+
+  <!-- Braille shown before the description of a picture that can be felt. The label is bd_tactile_graphic_label. [CHAR LIMIT=40] -->
+  <string name="bd_tactile_graphic_prefix"><xliff:g id="label">%1$s</xliff:g>: </string>
+
+</resources>

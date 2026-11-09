@@ -24,6 +24,7 @@ import android.os.Handler;
 import android.os.Looper;
 import androidx.annotation.Nullable;
 import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayLog;
+import com.google.android.accessibility.braille.brailledisplay.platform.TactileGraphicsDisplay;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.D2dConnection;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableDevice;
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableUsbDevice;
@@ -59,7 +60,7 @@ import java.util.function.Predicate;
  * <p>Connection state, writes and key decoding all run on the main thread. {@link Encoder} methods
  * may be called from TalkBack's display thread and hand their work to the main thread.
  */
-public class DotPadDriver implements Encoder {
+public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
   private static final String TAG = "DotPadDriver";
   public static final String DRIVER_CODE = "dotpad";
   public static final String DEVICE_NAME_PREFIX = "DotPad";
@@ -104,7 +105,8 @@ public class DotPadDriver implements Encoder {
     // Same as TalkBack's 3-finger swipe up and down: character, word, line, paragraph, headings, ...
     new KeyMapping(BrailleInputEvent.CMD_PREVIOUS_READING_CONTROL, "F1", "F3"),
     new KeyMapping(BrailleInputEvent.CMD_NEXT_READING_CONTROL, "F2", "F4"),
-    new KeyMapping(BrailleInputEvent.CMD_GLOBAL_RECENTS, "F1", "F4"),
+    new KeyMapping(BrailleInputEvent.CMD_SHOW_TACTILE_GRAPHIC, "F1", "F4"),
+    new KeyMapping(BrailleInputEvent.CMD_LEND_BRAILLE_DISPLAY, "F1", "F2", "F3", "F4"),
     new KeyMapping(BrailleInputEvent.CMD_NAV_TOP, DotPadKeyDecoder.KEY_PAN_LEFT, "F2"),
     new KeyMapping(
         BrailleInputEvent.CMD_NAVIGATE_BY_READING_GRANULARITY_OR_ADJUST_READING_CONTROL_BACKWARD,
@@ -193,6 +195,10 @@ public class DotPadDriver implements Encoder {
   // Write state (main thread only).
   /** Latest braille cells from TalkBack, kept so a page can be re-rendered after reconnecting. */
   @Nullable private byte[] latestBrailleCells;
+  /** Graphic being drawn in place of the braille page, or {@code null} to show braille. */
+  @Nullable private boolean[] graphicPins;
+  /** Whether a graphic has been asked for and not cleared; read from any thread. */
+  private volatile boolean showingGraphic;
   /** Physical cells TalkBack wants on each graphics line. */
   @Nullable private byte[][] desiredLines;
   /** Physical cells the display is known to show on each line; a {@code null} line is unknown. */
@@ -285,6 +291,11 @@ public class DotPadDriver implements Encoder {
       boardInfo = null;
       latestBrailleCells = null;
       desiredLines = null;
+      graphicPins = null;
+      showingGraphic = false;
+      if (TactileGraphicsDisplay.getCurrent() == this) {
+        TactileGraphicsDisplay.setCurrent(null);
+      }
     }
   }
 
@@ -373,10 +384,64 @@ public class DotPadDriver implements Encoder {
     return (info != null && info.graphic.isPresent()) ? info.graphic.rows : DEFAULT_GRAPHIC_ROWS;
   }
 
+  // ---- TactileGraphicsDisplay implementation ----
+
+  @Override
+  public int getGraphicWidth() {
+    return graphicColumns() * DotPadPageRenderer.PINS_PER_CELL_X;
+  }
+
+  @Override
+  public int getGraphicHeight() {
+    return graphicRows() * DotPadPageRenderer.PINS_PER_CELL_Y;
+  }
+
+  @Override
+  public void showGraphic(boolean[] pins) {
+    boolean[] copy = pins.clone();
+    int width = getGraphicWidth();
+    int height = getGraphicHeight();
+    showingGraphic = true;
+    mainHandler.post(
+        () -> {
+          graphicPins = copy;
+          desiredLines =
+              DotPadPageRenderer.renderGraphic(copy, width, height, graphicColumns(), graphicRows());
+          pumpLines();
+        });
+  }
+
+  @Override
+  public void clearGraphic() {
+    showingGraphic = false;
+    mainHandler.post(
+        () -> {
+          if (graphicPins == null) {
+            return;
+          }
+          graphicPins = null;
+          if (latestBrailleCells != null) {
+            setPage(latestBrailleCells);
+          } else {
+            desiredLines = new byte[graphicRows()][graphicColumns()];
+            pumpLines();
+          }
+        });
+  }
+
+  @Override
+  public boolean isShowingGraphic() {
+    return showingGraphic;
+  }
+
   // ---- Page writing (main thread) ----
 
   private void setPage(byte[] brailleCells) {
     latestBrailleCells = brailleCells;
+    if (graphicPins != null) {
+      // Kept for when the graphic is cleared.
+      return;
+    }
     int physicalColumns = graphicColumns();
     int physicalRows = graphicRows();
     desiredLines =
@@ -570,7 +635,13 @@ public class DotPadDriver implements Encoder {
       connectedNotified = true;
       cb.onConnected();
     }
-    if (latestBrailleCells != null) {
+    TactileGraphicsDisplay.setCurrent(this);
+    if (graphicPins != null) {
+      desiredLines =
+          DotPadPageRenderer.renderGraphic(
+              graphicPins, getGraphicWidth(), getGraphicHeight(), graphicColumns(), graphicRows());
+      pumpLines();
+    } else if (latestBrailleCells != null) {
       // Re-render in case the board information changed the page size.
       setPage(latestBrailleCells);
     }

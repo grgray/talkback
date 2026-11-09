@@ -17,11 +17,20 @@
 package com.google.android.accessibility.braille.brailledisplay.platform.access;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
 import android.annotation.SuppressLint;
 import android.app.KeyguardManager;
+import android.bluetooth.BluetoothDevice;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Path;
+import android.graphics.Rect;
+import android.graphics.Region;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -30,10 +39,14 @@ import android.os.Message;
 import android.os.Messenger;
 import android.os.RemoteException;
 import android.util.Pair;
+import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
+import androidx.core.content.ContextCompat;
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 import com.google.android.accessibility.braille.brailledisplay.BrailleDisplayLog;
 import com.google.android.accessibility.braille.brailledisplay.R;
 import com.google.android.accessibility.braille.brailledisplay.platform.Connectioneer;
@@ -42,6 +55,8 @@ import com.google.android.accessibility.braille.brailledisplay.platform.connect.
 import com.google.android.accessibility.braille.brailledisplay.platform.connect.device.ConnectableUsbDevice;
 import com.google.android.accessibility.braille.common.BrailleCommonTalkBackSpeaker;
 import com.google.android.accessibility.braille.common.TalkBackSpeaker.AnnounceType;
+import com.google.android.accessibility.utils.AccessibilityNodeInfoUtils;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -63,6 +78,14 @@ import java.util.List;
  *   <li>If the user connects a display from TalkBack's settings, TalkBack reclaims it.
  * </ul>
  *
+ * <p><b>Open lending</b>, for clients that can't use the access service, such as web apps using
+ * Web Bluetooth: {@link #lendToForegroundApp} releases the display so whatever the user connects
+ * next can use it. It starts when the user activates a button marked with {@link
+ * #CONNECT_BUTTON_ROLE_DESCRIPTION}, or with the lend command. With no client to ask, TalkBack
+ * takes the display back when the display's Bluetooth connection ends, or if nothing connects
+ * within {@link #OPEN_LEND_CONNECT_TIMEOUT_MS}, or if the user leaves the app before anything
+ * connects.
+ *
  * <p>All state is on the main thread.
  */
 public final class BrailleDisplayLeaseManager {
@@ -73,6 +96,22 @@ public final class BrailleDisplayLeaseManager {
   static final long RELEASE_TIMEOUT_MS = 2_000L;
   /** Time for TalkBack's link to the display to drop before the app is told to connect. */
   static final long LINK_RELEASE_DELAY_MS = 500L;
+  /** How long an open lend waits for something to connect before TalkBack takes the display back. */
+  static final long OPEN_LEND_CONNECT_TIMEOUT_MS = 60_000L;
+  /** How long the tap on a web app's connect button lasts. */
+  private static final long CONNECT_TAP_DURATION_MS = 50;
+  /** Pause between lending the display and tapping a web app's connect button. */
+  private static final long CONNECT_TAP_DELAY_MS = 500;
+  /** Pause after the tap before touch exploration covers the button again. */
+  private static final long PASSTHROUGH_CLEAR_DELAY_MS = 300;
+  /** Most nodes to look through when searching a browser's device list. */
+  private static final int MAX_CHOOSER_NODES = 300;
+
+  /**
+   * Role description that marks a web app's "connect to braille display" button, set with {@code
+   * aria-roledescription}. Activating it lends the display.
+   */
+  public static final String CONNECT_BUTTON_ROLE_DESCRIPTION = "braille display connect";
 
   private enum State {
     /** TalkBack owns the display (or has none). */
@@ -160,6 +199,21 @@ public final class BrailleDisplayLeaseManager {
   /** The display TalkBack released, to reconnect when the lease ends; may be null. */
   @Nullable private ConnectableDevice releasedDevice;
 
+  // Open lending (no client): all main thread.
+  private final Runnable openLendTimeoutRunnable = this::onOpenLendTimeout;
+  private final Runnable openLendForegroundRunnable = this::onOpenLendForegroundElapsed;
+  /** True while the display is lent openly, to whatever connects next. */
+  private boolean openLend;
+  /** The app in the foreground when the display was lent openly, such as the browser. */
+  @Nullable private String openLendPackage;
+  /** True once something has connected to the display during an open lend. */
+  private boolean openLendConnected;
+  @Nullable private BroadcastReceiver aclReceiver;
+  /** Whether the display has been selected in the browser's device list during this open lend. */
+  private boolean chooserDeviceSelected;
+  /** Whether focus has been moved to the device list's pair button during this open lend. */
+  private boolean chooserPairFocused;
+
   private BrailleDisplayLeaseManager(Context context) {
     this.context = context;
   }
@@ -174,6 +228,7 @@ public final class BrailleDisplayLeaseManager {
    * reclaim it into.
    */
   public void onServiceStopped() {
+    stopOpenLend();
     accessibilityService = null;
     if (lease != null) {
       lease.unlink();
@@ -328,6 +383,9 @@ public final class BrailleDisplayLeaseManager {
   // ---- State transitions ----
 
   private void grant(Lease request) {
+    // An app asking through the access service takes over an open lend; the display is already
+    // released.
+    stopOpenLend();
     lease = request;
     if (pending == request) {
       pending = null;
@@ -450,6 +508,7 @@ public final class BrailleDisplayLeaseManager {
       return;
     }
     BrailleDisplayLog.d(TAG, "User reclaimed the display");
+    stopOpenLend();
     mainHandler.removeCallbacksAndMessages(null);
     graceScheduled = false;
     if (lease != null) {
@@ -467,14 +526,356 @@ public final class BrailleDisplayLeaseManager {
     announce(context.getString(R.string.bd_access_returned));
   }
 
+  // ---- Open lending ----
+
+  /** Returns whether {@code node} is a web app's button marked for connecting a braille display. */
+  public static boolean isConnectButton(@Nullable AccessibilityNodeInfoCompat node) {
+    if (node == null) {
+      return false;
+    }
+    CharSequence roleDescription = node.getRoleDescription();
+    return roleDescription != null
+        && CONNECT_BUTTON_ROLE_DESCRIPTION.equalsIgnoreCase(roleDescription.toString().trim());
+  }
+
+  /**
+   * If {@code node} is a web app's marked connect button, lends the display and taps the button for
+   * real. Browsers only show their device list for a genuine user gesture, and an accessibility
+   * click (from a braille display key or a double-tap) isn't one. Returns {@code false} if {@code
+   * node} isn't a marked connect button or the tap can't be sent, so the caller activates it as
+   * usual. Main thread only.
+   */
+  public boolean activateConnectButton(@Nullable AccessibilityNodeInfoCompat node) {
+    if (!isConnectButton(node)) {
+      return false;
+    }
+    // Let go first, so the display is free when the browser looks for it.
+    lendToForegroundApp();
+    AccessibilityService service = accessibilityService;
+    Rect bounds = new Rect();
+    node.getBoundsInScreen(bounds);
+    if (service == null || bounds.isEmpty() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+      return false;
+    }
+    // While touch exploration is on, a tap only explores. A passthrough region over the button
+    // sends touches there straight to the app, so the tap presses the button.
+    service.setTouchExplorationPassthroughRegion(Display.DEFAULT_DISPLAY, new Region(bounds));
+    Path path = new Path();
+    path.moveTo(bounds.exactCenterX(), bounds.exactCenterY());
+    GestureDescription tap =
+        new GestureDescription.Builder()
+            .addStroke(
+                new GestureDescription.StrokeDescription(
+                    path, /* startTime= */ 0, /* duration= */ CONNECT_TAP_DURATION_MS))
+            .build();
+    AccessibilityService.GestureResultCallback clearRegion =
+        new AccessibilityService.GestureResultCallback() {
+          @Override
+          public void onCompleted(GestureDescription gesture) {
+            clearPassthroughRegion(service);
+          }
+
+          @Override
+          public void onCancelled(GestureDescription gesture) {
+            clearPassthroughRegion(service);
+          }
+        };
+    // Give the region a moment to take effect, and the display a moment to start advertising, so
+    // it is already in the browser's list when the list opens.
+    mainHandler.postDelayed(
+        () -> {
+          if (!service.dispatchGesture(tap, clearRegion, /* handler= */ null)) {
+            clearPassthroughRegion(service);
+          }
+        },
+        CONNECT_TAP_DELAY_MS);
+    return true;
+  }
+
+  @RequiresApi(Build.VERSION_CODES.R)
+  private void clearPassthroughRegion(AccessibilityService service) {
+    // Wait for the tap's touch events to pass before touch exploration covers the button again.
+    mainHandler.postDelayed(
+        () -> service.setTouchExplorationPassthroughRegion(Display.DEFAULT_DISPLAY, new Region()),
+        PASSTHROUGH_CLEAR_DELAY_MS);
+  }
+
+  /**
+   * Lends the display to whatever the user connects next, for apps that can't use the access
+   * service, such as web apps. Returns {@code false} if there is no display to lend, or it is
+   * already lent.
+   */
+  public boolean lendToForegroundApp() {
+    if (displaySuspended || lease != null || accessibilityService == null) {
+      return false;
+    }
+    Connectioneer connectioneer = Connectioneer.getInstance(context);
+    if (connectioneer.getConnectingOrConnectedDevice().isEmpty()) {
+      return false;
+    }
+    displaySuspended = true;
+    releasedDevice = connectioneer.releaseDisplayForExternalApp().orElse(null);
+    openLend = true;
+    openLendPackage = foregroundPackage();
+    openLendConnected = false;
+    chooserDeviceSelected = false;
+    chooserPairFocused = false;
+    BrailleDisplayLog.d(TAG, "Display lent openly while " + openLendPackage + " is in front");
+    registerAclReceiver();
+    mainHandler.postDelayed(openLendTimeoutRunnable, OPEN_LEND_CONNECT_TIMEOUT_MS);
+    announce(context.getString(R.string.bd_access_lent_open));
+    return true;
+  }
+
+  /** Ends an open lend and reconnects TalkBack. */
+  private void endOpenLend() {
+    if (!openLend) {
+      return;
+    }
+    stopOpenLend();
+    reclaim();
+  }
+
+  /** Clears the open lend state, without reconnecting. */
+  private void stopOpenLend() {
+    mainHandler.removeCallbacks(openLendTimeoutRunnable);
+    mainHandler.removeCallbacks(openLendForegroundRunnable);
+    unregisterAclReceiver();
+    openLend = false;
+    openLendPackage = null;
+    openLendConnected = false;
+    chooserDeviceSelected = false;
+    chooserPairFocused = false;
+  }
+
+  private void onOpenLendTimeout() {
+    if (openLend && !openLendConnected) {
+      BrailleDisplayLog.d(TAG, "Nothing connected to the lent display; taking it back");
+      endOpenLend();
+    }
+  }
+
+  private void onOpenLendForegroundMaybeChanged() {
+    if (!openLend || openLendConnected || isScreenLocked()) {
+      return;
+    }
+    String foreground = foregroundPackage();
+    if (foreground != null && !foreground.equals(openLendPackage)) {
+      mainHandler.removeCallbacks(openLendForegroundRunnable);
+      mainHandler.postDelayed(openLendForegroundRunnable, FOREGROUND_GRACE_MS);
+    }
+  }
+
+  private void onOpenLendForegroundElapsed() {
+    String foreground = foregroundPackage();
+    if (openLend
+        && !openLendConnected
+        && foreground != null
+        && !foreground.equals(openLendPackage)) {
+      BrailleDisplayLog.d(TAG, "Left " + openLendPackage + " before anything connected");
+      endOpenLend();
+    }
+  }
+
+  /**
+   * If the browser's device list is showing, selects the lent display in it and moves focus to the
+   * list's pair button, so the user only has to activate it. Chrome's list doesn't expose device
+   * names well to screen readers. The display is found by name, or else the first device listed is
+   * taken; web apps for the display ask the browser to list only matching devices. Pairing itself
+   * is left to the user.
+   */
+  private void selectInDeviceChooser() {
+    AccessibilityService service = accessibilityService;
+    if (service == null || openLendPackage == null || chooserPairFocused) {
+      return;
+    }
+    AccessibilityNodeInfo root = service.getRootInActiveWindow();
+    if (root == null || !openLendPackage.contentEquals(String.valueOf(root.getPackageName()))) {
+      return;
+    }
+    List<AccessibilityNodeInfo> pairButtons =
+        root.findAccessibilityNodeInfosByViewId(openLendPackage + ":id/positive");
+    if (pairButtons.isEmpty()) {
+      return;
+    }
+    AccessibilityNodeInfo pairButton = pairButtons.get(0);
+    if (!chooserDeviceSelected) {
+      AccessibilityNodeInfo item = findDeviceInChooser(root);
+      if (item == null) {
+        // Still scanning.
+        return;
+      }
+      chooserDeviceSelected = item.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+      BrailleDisplayLog.d(TAG, "Selected the display in the device list: " + chooserDeviceSelected);
+    }
+    pairButton.refresh();
+    if (chooserDeviceSelected && pairButton.isEnabled()) {
+      chooserPairFocused =
+          pairButton.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
+      ConnectableDevice device = releasedDevice;
+      String name =
+          device != null && device.name() != null
+              ? device.name()
+              : context.getString(R.string.bd_access_display_generic_name);
+      announce(context.getString(R.string.bd_access_display_selected, name));
+    }
+  }
+
+  /**
+   * Finds the lent display's entry in a device list: the entry showing its name, or else the first
+   * entry of the list. Returns the node to select, or {@code null} if there is none yet.
+   */
+  @Nullable
+  private AccessibilityNodeInfo findDeviceInChooser(AccessibilityNodeInfo root) {
+    ConnectableDevice device = releasedDevice;
+    String name = device != null ? device.name() : null;
+    AccessibilityNodeInfo firstListEntry = null;
+    List<AccessibilityNodeInfo> queue = new ArrayList<>();
+    queue.add(root);
+    for (int i = 0; i < queue.size() && i < MAX_CHOOSER_NODES; i++) {
+      AccessibilityNodeInfo node = queue.get(i);
+      if (name != null
+          && (containsIgnoreCase(node.getText(), name)
+              || containsIgnoreCase(node.getContentDescription(), name))) {
+        AccessibilityNodeInfo clickable = clickableSelfOrAncestor(node);
+        if (clickable != null) {
+          return clickable;
+        }
+      }
+      CharSequence className = node.getClassName();
+      if (firstListEntry == null
+          && className != null
+          && (className.toString().endsWith("ListView")
+              || className.toString().endsWith("RecyclerView"))
+          && node.getChildCount() > 0) {
+        AccessibilityNodeInfo entry = node.getChild(0);
+        firstListEntry = entry != null ? clickableSelfOrDescendant(entry) : null;
+      }
+      for (int c = 0; c < node.getChildCount(); c++) {
+        AccessibilityNodeInfo child = node.getChild(c);
+        if (child != null) {
+          queue.add(child);
+        }
+      }
+    }
+    return firstListEntry;
+  }
+
+  private static boolean containsIgnoreCase(@Nullable CharSequence text, String part) {
+    return text != null && text.toString().toLowerCase().contains(part.toLowerCase());
+  }
+
+  @Nullable
+  private static AccessibilityNodeInfo clickableSelfOrAncestor(AccessibilityNodeInfo node) {
+    AccessibilityNodeInfo current = node;
+    for (int depth = 0; current != null && depth < 5; depth++) {
+      if (current.isClickable()) {
+        return current;
+      }
+      current = current.getParent();
+    }
+    return null;
+  }
+
+  private static AccessibilityNodeInfo clickableSelfOrDescendant(AccessibilityNodeInfo node) {
+    if (node.isClickable()) {
+      return node;
+    }
+    for (int c = 0; c < node.getChildCount(); c++) {
+      AccessibilityNodeInfo child = node.getChild(c);
+      if (child != null && child.isClickable()) {
+        return child;
+      }
+    }
+    // A list entry may be selectable without saying it is clickable.
+    return node;
+  }
+
+  /**
+   * Watches the lent display's Bluetooth link: once something connects to it, TalkBack takes it
+   * back when that connection ends, such as when the web page is closed.
+   */
+  @SuppressLint("MissingPermission")
+  private void registerAclReceiver() {
+    unregisterAclReceiver();
+    ConnectableDevice device = releasedDevice;
+    if (device == null || device instanceof ConnectableUsbDevice || device.address() == null) {
+      // USB, or nothing known: rely on the timeout and on leaving the app.
+      return;
+    }
+    String address = device.address();
+    aclReceiver =
+        new BroadcastReceiver() {
+          @Override
+          @SuppressWarnings("deprecation") // getParcelableExtra(String, Class) needs API 33.
+          public void onReceive(Context receiverContext, Intent intent) {
+            BluetoothDevice changed = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+            if (changed == null || !address.equalsIgnoreCase(changed.getAddress())) {
+              return;
+            }
+            onAclChanged(BluetoothDevice.ACTION_ACL_CONNECTED.equals(intent.getAction()));
+          }
+        };
+    IntentFilter filter = new IntentFilter();
+    filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+    filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
+    ContextCompat.registerReceiver(
+        context, aclReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
+  }
+
+  private void unregisterAclReceiver() {
+    if (aclReceiver != null) {
+      context.unregisterReceiver(aclReceiver);
+      aclReceiver = null;
+    }
+  }
+
+  private void onAclChanged(boolean connected) {
+    if (!openLend) {
+      return;
+    }
+    if (connected) {
+      BrailleDisplayLog.d(TAG, "Something connected to the lent display");
+      openLendConnected = true;
+      mainHandler.removeCallbacks(openLendTimeoutRunnable);
+      mainHandler.removeCallbacks(openLendForegroundRunnable);
+    } else if (openLendConnected) {
+      // TalkBack's own disconnect, just after lending, comes before anything connects, so only a
+      // disconnect after a connection ends the lend.
+      BrailleDisplayLog.d(TAG, "The lent display disconnected; taking it back");
+      endOpenLend();
+    }
+  }
+
   // ---- Foreground tracking ----
 
-  /** Feeds accessibility events in to notice when the holder leaves the foreground. */
+  /**
+   * Feeds accessibility events in: to lend the display when a marked connect button is activated,
+   * and to notice when the holder leaves the foreground.
+   */
   public void onAccessibilityEvent(AccessibilityEvent event) {
+    int type = event.getEventType();
+    if (type == AccessibilityEvent.TYPE_VIEW_CLICKED
+        && !displaySuspended
+        && isConnectButton(AccessibilityNodeInfoUtils.toCompat(event.getSource()))) {
+      BrailleDisplayLog.d(TAG, "Connect button activated; lending the display");
+      lendToForegroundApp();
+      return;
+    }
+    if (openLend
+        && (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED)) {
+      onOpenLendForegroundMaybeChanged();
+    }
+    if (openLend
+        && !openLendConnected
+        && (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            || type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)) {
+      selectInDeviceChooser();
+    }
     if (lease == null) {
       return;
     }
-    int type = event.getEventType();
     if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
         || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
       onForegroundMaybeChanged();

@@ -48,6 +48,7 @@ import com.google.android.accessibility.braille.brailledisplay.controller.CellsC
 import com.google.android.accessibility.braille.brailledisplay.controller.popupmessage.PopUpHistory;
 import com.google.android.accessibility.braille.brailledisplay.controller.popupmessage.SnackbarParser;
 import com.google.android.accessibility.braille.brailledisplay.controller.utils.BrailleKeyBindingUtils;
+import com.google.android.accessibility.braille.brailledisplay.platform.access.BrailleDisplayLeaseManager;
 import com.google.android.accessibility.braille.brltty.BrailleInputEvent;
 import com.google.android.accessibility.braille.common.BrailleCommonTalkBackSpeaker;
 import com.google.android.accessibility.braille.common.BrailleUserPreferences;
@@ -193,6 +194,11 @@ public class EventManager implements EventConsumer {
     if (shouldOverrideCommandForLearningMode() && handleLearningModeOverrides(command)) {
       return true;
     }
+    if ((command == BrailleInputEvent.CMD_ACTIVATE_CURRENT
+            || command == BrailleInputEvent.CMD_KEY_ENTER)
+        && activateConnectButton()) {
+      return true;
+    }
     if (shouldPanUp(command)) {
       if (currentConsumer.onPanUp() || behaviorNavigation.panUp()) {
         return true;
@@ -270,6 +276,17 @@ public class EventManager implements EventConsumer {
         break;
       }
     }
+  }
+
+  /**
+   * If focus is on a web app's marked connect button, lends the braille display and taps the button
+   * for real; see {@link BrailleDisplayLeaseManager#activateConnectButton}. Returns {@code false}
+   * otherwise, so the usual activation runs.
+   */
+  private boolean activateConnectButton() {
+    return BrailleDisplayLeaseManager.getInstance(context)
+        .activateConnectButton(
+            behaviorFocus.getAccessibilityFocusNode(/* fallbackOnRoot= */ false));
   }
 
   private boolean shouldPanUp(int command) {

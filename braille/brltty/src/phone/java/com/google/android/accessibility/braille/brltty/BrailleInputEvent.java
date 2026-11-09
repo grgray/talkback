@@ -475,6 +475,18 @@ public class BrailleInputEvent implements Parcelable {
   /** Keyboard command: Previous unvisited link in page. */
   public static final int CMD_UNVISITED_LINK_PREVIOUS = 203;
 
+  /**
+   * Keyboard command: Draw the focused item as a tactile graphic, on displays that can draw
+   * graphics.
+   */
+  public static final int CMD_SHOW_TACTILE_GRAPHIC = 204;
+
+  /**
+   * Keyboard command: Lend the braille display to whatever connects next, such as a web page,
+   * until it disconnects.
+   */
+  public static final int CMD_LEND_BRAILLE_DISPLAY = 205;
+
   // Meanings of the argument to a command.
 
   /** This command doesn't have an argument. */

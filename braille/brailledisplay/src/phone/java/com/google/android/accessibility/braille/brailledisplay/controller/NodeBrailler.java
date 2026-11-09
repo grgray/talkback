@@ -115,6 +115,9 @@ public class NodeBrailler {
     if (TextUtils.isEmpty(result) && event != null) {
       result = new SpannableStringBuilder(AccessibilityEventUtils.getEventTextOrDescription(event));
     }
+    if (TactileGraphicsDrawer.isMarked(node)) {
+      labelTactileGraphic(result);
+    }
     if (node.isAccessibilityFocused() && !TextUtils.isEmpty(result)) {
       DisplaySpans.addSelection(result, /* start= */ 0, /* end= */ 0);
     }
@@ -220,6 +223,21 @@ public class NodeBrailler {
             || role == Role.ROLE_PAGER
             || TextUtils.isEmpty(node.getContentDescription()))
         && role != Role.ROLE_WEB_VIEW;
+  }
+
+  /**
+   * Labels a picture marked to be drawn as "tactile graphic: ...", leaving out the "Tactile:"
+   * marker word at the start of its alt text.
+   */
+  private void labelTactileGraphic(SpannableStringBuilder text) {
+    int markerEnd = TactileGraphicsDrawer.markerEnd(text);
+    if (markerEnd >= 0) {
+      text.delete(0, markerEnd);
+    }
+    String label = context.getString(R.string.bd_tactile_graphic_label);
+    if (!text.toString().toLowerCase().contains(label.toLowerCase())) {
+      text.insert(0, context.getString(R.string.bd_tactile_graphic_prefix, label));
+    }
   }
 
   private void addSpaceAfterNewLine(SpannableStringBuilder text) {

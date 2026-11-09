@@ -64,6 +64,7 @@ import androidx.annotation.RequiresApi;
 import androidx.annotation.VisibleForTesting;
 import androidx.annotation.WorkerThread;
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
+import com.google.android.accessibility.braille.brailledisplay.platform.access.BrailleDisplayLeaseManager;
 import com.google.android.accessibility.talkback.PrimesController.TimerAction;
 import com.google.android.accessibility.talkback.flags.FeatureFlagReader;
 import com.google.android.accessibility.talkback.focusmanagement.FocusProcessorForTapAndTouchExploration;
@@ -923,7 +924,29 @@ public class TouchInteractionMonitor
     // Log isDefaultDisplay/gestureId/onGestureDetectedTime. The targetGestureTimeout is the current
     // time minus lastMotionEventTransmissionLatency
     Performance.getInstance().onGestureRecognized(eventId, gestureId);
-    if (gestureId == AccessibilityService.GESTURE_DOUBLE_TAP) {
+    if (gestureId == AccessibilityService.GESTURE_DOUBLE_TAP && isFocusOnConnectButton()) {
+      // A web app's marked connect button: lend the braille display and tap the button for real,
+      // as the browser ignores an accessibility click there. Fall back to the usual double-tap if
+      // the tap can't be sent.
+      boolean handlesDoubleTap = serviceHandlesDoubleTap;
+      mainHandler.post(
+          () -> {
+            AccessibilityNodeInfo focus =
+                service.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY);
+            boolean tapped =
+                focus != null
+                    && BrailleDisplayLeaseManager.getInstance(service)
+                        .activateConnectButton(AccessibilityNodeInfoCompat.wrap(focus));
+            if (!tapped) {
+              if (handlesDoubleTap) {
+                boolean unused = service.onGesture(gestureEvent);
+              } else {
+                controller.performClick();
+              }
+            }
+          });
+      clear();
+    } else if (gestureId == AccessibilityService.GESTURE_DOUBLE_TAP) {
       if (serviceHandlesDoubleTap) {
         dispatchGestureToMainThreadAndClear(gestureEvent);
       } else {
@@ -959,6 +982,13 @@ public class TouchInteractionMonitor
           boolean unused = service.onGesture(gestureEvent);
         });
     clear();
+  }
+
+  /** Returns whether accessibility focus is on a web app's marked braille display connect button. */
+  private boolean isFocusOnConnectButton() {
+    AccessibilityNodeInfo focus = service.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY);
+    return focus != null
+        && BrailleDisplayLeaseManager.isConnectButton(AccessibilityNodeInfoCompat.wrap(focus));
   }
 
   /** Dispatch a gesture event to the main thread of the service, but do not clear state. */
