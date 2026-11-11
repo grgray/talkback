@@ -91,6 +91,18 @@ public final class DotPadPacket {
   }
 
   /**
+   * Creates a text-mode display line request writing braille {@code cells} from {@code startCell}.
+   * In text mode the cells are in standard braille dot order (bits 0 to 7 are dots 1 to 8), as Dot
+   * Inc's SDKs send them to the braille line.
+   */
+  public static DotPadPacket displayTextLine(int lineId, int startCell, byte[] cells) {
+    byte[] data = new byte[cells.length + 1];
+    data[0] = (byte) startCell;
+    System.arraycopy(cells, 0, data, 1, cells.length);
+    return new DotPadPacket(lineId, REQ_DISPLAY_LINE, SEQ_TEXT_MODE, data);
+  }
+
+  /**
    * Creates a partial display request that writes a rectangle of graphic-mode cells in one packet:
    * cells {@code startCell} (inclusive) to {@code endCell} (exclusive) of each of {@code
    * rows.length} consecutive lines starting at {@code firstLineId}. The display acknowledges with

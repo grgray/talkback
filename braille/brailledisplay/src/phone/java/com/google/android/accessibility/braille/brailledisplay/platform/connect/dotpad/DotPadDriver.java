@@ -69,6 +69,10 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
   private static final int DEFAULT_GRAPHIC_COLUMNS = 30;
   private static final int DEFAULT_GRAPHIC_ROWS = 10;
   private static final int GRAPHIC_FIRST_LINE_ID = 1;
+  /** Line ID of the separate braille line. */
+  private static final int BRAILLE_LINE_ID = 0;
+  /** Braille line size used until the display reports its board information (Dot Pad X). */
+  private static final int DEFAULT_BRAILLE_LINE_CELLS = 20;
   private static final long BOARD_INFO_TIMEOUT_MS = 2_000L;
   /** Added to the display's reported refresh time to allow for transport latency. */
   private static final long LINE_TIMEOUT_MARGIN_MS = 1_000L;
@@ -203,6 +207,12 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
   @Nullable private byte[][] desiredLines;
   /** Physical cells the display is known to show on each line; a {@code null} line is unknown. */
   @Nullable private byte[][] displayedLines;
+  /** Cells wanted on the braille line, or {@code null} to leave it alone. */
+  @Nullable private byte[] desiredBrailleLine;
+  /** Cells the braille line is known to show, or {@code null} if unknown. */
+  @Nullable private byte[] displayedBrailleLine;
+  /** Braille line cells being written, or {@code null} if the braille line isn't being written. */
+  @Nullable private byte[] inFlightBrailleLine;
   /** First line of the write in flight, or {@code -1} if none. */
   private int inFlightFirstLine = -1;
   /** Full desired contents of each line covered by the write in flight. */
@@ -285,12 +295,15 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
     pendingCommands.clear();
     inFlightFirstLine = -1;
     inFlightLines = null;
+    inFlightBrailleLine = null;
     writeRetries = 0;
     displayedLines = null;
+    displayedBrailleLine = null;
     if (!keepPage) {
       boardInfo = null;
       latestBrailleCells = null;
       desiredLines = null;
+      desiredBrailleLine = null;
       graphicPins = null;
       showingGraphic = false;
       if (TactileGraphicsDisplay.getCurrent() == this) {
@@ -434,6 +447,33 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
     return showingGraphic;
   }
 
+  @Override
+  public int getBrailleLineCells() {
+    DotPadBoardInfo info = boardInfo;
+    if (info == null) {
+      return DEFAULT_BRAILLE_LINE_CELLS;
+    }
+    return info.text.isPresent() ? info.text.columns : 0;
+  }
+
+  @Override
+  public void showBrailleLine(@Nullable byte[] cells) {
+    byte[] copy = cells == null ? null : cells.clone();
+    mainHandler.post(
+        () -> {
+          int width = getBrailleLineCells();
+          if (width <= 0) {
+            return;
+          }
+          byte[] line = new byte[width];
+          if (copy != null) {
+            System.arraycopy(copy, 0, line, 0, Math.min(copy.length, width));
+          }
+          desiredBrailleLine = line;
+          pumpLines();
+        });
+  }
+
   // ---- Page writing (main thread) ----
 
   private void setPage(byte[] brailleCells) {
@@ -462,7 +502,11 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
   private void pumpLines() {
     mainHandler.removeCallbacks(pumpRunnable);
     byte[][] desired = desiredLines;
-    if (!displayReady || inFlightFirstLine >= 0 || desired == null) {
+    if (!displayReady || isWriteInFlight()) {
+      return;
+    }
+    if (desired == null) {
+      pumpBrailleLine();
       return;
     }
     if (displayedLines == null || displayedLines.length != desired.length) {
@@ -485,6 +529,8 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
       endCell = Math.max(endCell, range[1] + 1);
     }
     if (firstLine < 0) {
+      // The graphics area is up to date; write the braille line if it has changed.
+      pumpBrailleLine();
       return;
     }
     inFlightFirstLine = firstLine;
@@ -498,6 +544,26 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
       BrailleDisplayLog.w(TAG, "Transport not ready; dropping write");
       finishWrite(/* displayed= */ false);
     }
+  }
+
+  /** Writes the braille line if it differs from what the display shows. Nothing may be in flight. */
+  private void pumpBrailleLine() {
+    byte[] desired = desiredBrailleLine;
+    if (desired == null || Arrays.equals(desired, displayedBrailleLine)) {
+      return;
+    }
+    inFlightBrailleLine = desired;
+    DotPadPacket packet = DotPadPacket.displayTextLine(BRAILLE_LINE_ID, /* startCell= */ 0, desired);
+    BrailleDisplayLog.v(TAG, "Writing " + packet);
+    mainHandler.postDelayed(lineTimeoutRunnable, lineTimeoutMs());
+    if (!write(packet)) {
+      BrailleDisplayLog.w(TAG, "Transport not ready; dropping braille line write");
+      finishWrite(/* displayed= */ false);
+    }
+  }
+
+  private boolean isWriteInFlight() {
+    return inFlightFirstLine >= 0 || inFlightBrailleLine != null;
   }
 
   /**
@@ -541,6 +607,18 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
    */
   private void finishWrite(boolean displayed) {
     mainHandler.removeCallbacks(lineTimeoutRunnable);
+    if (inFlightBrailleLine != null) {
+      if (displayed || ++writeRetries > MAX_WRITE_RETRIES) {
+        displayedBrailleLine = inFlightBrailleLine;
+        writeRetries = 0;
+        inFlightBrailleLine = null;
+        pumpLines();
+      } else {
+        inFlightBrailleLine = null;
+        mainHandler.postDelayed(pumpRunnable, WRITE_RETRY_DELAY_MS);
+      }
+      return;
+    }
     if (inFlightFirstLine < 0) {
       return;
     }
@@ -594,14 +672,14 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
       case DotPadPacket.RSP_DISPLAY_PARTIAL:
       case DotPadPacket.RSP_DISPLAY_LINE:
         int code = packet.getDataByte(0);
-        if (code != DotPadPacket.DISPLAY_ACK && inFlightFirstLine >= 0) {
+        if (code != DotPadPacket.DISPLAY_ACK && isWriteInFlight()) {
           BrailleDisplayLog.w(TAG, "Write at line " + packet.getDestination() + " rejected: " + code);
           finishWrite(/* displayed= */ false);
         }
         break;
       case DotPadPacket.NTF_DISPLAY_PARTIAL:
       case DotPadPacket.NTF_DISPLAY_LINE:
-        if (inFlightFirstLine >= 0) {
+        if (isWriteInFlight()) {
           finishWrite(/* displayed= */ true);
         }
         break;
@@ -644,6 +722,9 @@ public class DotPadDriver implements Encoder, TactileGraphicsDisplay {
     } else if (latestBrailleCells != null) {
       // Re-render in case the board information changed the page size.
       setPage(latestBrailleCells);
+    } else {
+      // Nothing for the graphics area; the braille line may still need writing.
+      pumpLines();
     }
   }
 

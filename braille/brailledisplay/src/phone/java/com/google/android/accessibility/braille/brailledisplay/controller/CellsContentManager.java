@@ -257,6 +257,16 @@ public class CellsContentManager implements CellsContentConsumer {
 
   /** Dismisses current timed message and shows next type of timed message if possible. */
   @Override
+  @Nullable
+  public byte[] translate(CharSequence text) {
+    if (translatorManager.getOutputTranslator() == null) {
+      return null;
+    }
+    TranslationResult result = translatorManager.getOutputTranslator().translate(text, NO_CURSOR);
+    return result == null ? null : result.cells().toByteArray();
+  }
+
+  @Override
   public void dismissTimedMessage() {
     TimedMessager.Type type = getCurrentTimedMessageType();
     if (type != null) {

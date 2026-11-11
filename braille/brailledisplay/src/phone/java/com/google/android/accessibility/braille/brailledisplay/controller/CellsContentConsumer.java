@@ -17,6 +17,7 @@
 package com.google.android.accessibility.braille.brailledisplay.controller;
 
 import android.text.style.ClickableSpan;
+import androidx.annotation.Nullable;
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 import java.util.Optional;
 
@@ -56,6 +57,13 @@ public interface CellsContentConsumer {
 
   /** Returns whether timed message is displaying. */
   boolean isTimedMessageDisplaying();
+
+  /**
+   * Translates {@code text} into braille cells with the user's output braille table, or returns
+   * {@code null} if no translator is ready.
+   */
+  @Nullable
+  byte[] translate(CharSequence text);
 
   /** Returns whether caption is displaying. */
   boolean isCaptionShowing();

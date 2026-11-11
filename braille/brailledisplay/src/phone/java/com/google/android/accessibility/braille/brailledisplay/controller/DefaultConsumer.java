@@ -220,7 +220,8 @@ class DefaultConsumer implements EventConsumer {
     this.tactileGraphicsDrawer =
         new TactileGraphicsDrawer(
             behaviorScreenReaderAction::getAccessibilityService,
-            () -> feedbackManager.emitFeedback(FeedbackManager.Type.COMMAND_FAILED));
+            () -> feedbackManager.emitFeedback(FeedbackManager.Type.COMMAND_FAILED),
+            cellsContentConsumer::translate);
     loggingHandler = new LoggingHandler(context);
   }
 
@@ -668,7 +669,11 @@ class DefaultConsumer implements EventConsumer {
 
   @Override
   public boolean onPanUp() {
-    // Panning leaves a drawn picture and goes back to reading braille.
+    // While a picture is drawn, panning moves through its alt text on the braille line; panning
+    // back past the start leaves the picture and goes back to reading braille.
+    if (tactileGraphicsDrawer.panBrailleLine(/* forward= */ false)) {
+      return true;
+    }
     tactileGraphicsDrawer.clear();
     if (multiLineText == null || cellsContentConsumer.isTimedMessageDisplaying()) {
       return false;
@@ -703,6 +708,10 @@ class DefaultConsumer implements EventConsumer {
 
   @Override
   public boolean onPanDown() {
+    // Panning on past the end of a drawn picture's alt text leaves the picture.
+    if (tactileGraphicsDrawer.panBrailleLine(/* forward= */ true)) {
+      return true;
+    }
     tactileGraphicsDrawer.clear();
     if (multiLineText == null || cellsContentConsumer.isTimedMessageDisplaying()) {
       return false;

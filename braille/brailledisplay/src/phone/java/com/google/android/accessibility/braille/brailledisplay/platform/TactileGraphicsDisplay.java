@@ -45,6 +45,18 @@ public interface TactileGraphicsDisplay {
   /** Returns whether a graphic is being drawn. */
   boolean isShowingGraphic();
 
+  /**
+   * Returns the number of cells on the display's separate braille line, which can show text while a
+   * graphic is drawn, or 0 if it has none.
+   */
+  int getBrailleLineCells();
+
+  /**
+   * Shows {@code cells} (TalkBack's dot order: bits 0 to 7 are dots 1 to 8) on the separate braille
+   * line, blank-padded or cut to {@link #getBrailleLineCells}; {@code null} blanks it.
+   */
+  void showBrailleLine(@Nullable byte[] cells);
+
   /** Sets the display that can draw graphics, or {@code null} when there is none. */
   static void setCurrent(@Nullable TactileGraphicsDisplay display) {
     Holder.current = display;

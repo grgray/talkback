@@ -7,4 +7,7 @@
   <!-- Braille shown before the description of a picture that can be felt. The label is bd_tactile_graphic_label. [CHAR LIMIT=40] -->
   <string name="bd_tactile_graphic_prefix"><xliff:g id="label">%1$s</xliff:g>: </string>
 
+  <!-- Spoken when a picture drawn on a braille display is too tall to fit on the screen, so only part of it is drawn. [CHAR LIMIT=NONE] -->
+  <string name="bd_tactile_graphic_cut_off">Only part of the picture is on screen</string>
+
 </resources>
