@@ -57,47 +57,31 @@ import com.google.android.accessibility.braille.common.BrailleCommonTalkBackSpea
 import com.google.android.accessibility.braille.common.TalkBackSpeaker.AnnounceType;
 import com.google.android.accessibility.utils.AccessibilityNodeInfoUtils;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+
 
 /**
  * Lends the braille display to a third-party app and takes it back.
  *
  * <p>Works for any display TalkBack drives: it releases and reclaims the display through {@link
  * Connectioneer}'s normal disconnect and connect paths. See {@link BrailleDisplayAccessContract}
- * for the protocol.
- *
- * <p>Rules:
- *
- * <ul>
- *   <li>Only the foreground app may borrow the display.
- *   <li>When a different app comes to the foreground, access is revoked after {@link
- *       #FOREGROUND_GRACE_MS}, so brief switches (dialogs, the notification shade) don't bounce the
- *       display. Locking or turning off the screen never revokes access.
- *   <li>A revoked app gets {@link #RELEASE_TIMEOUT_MS} to disconnect before TalkBack reconnects.
- *   <li>If the borrowing app's process dies, TalkBack reclaims the display immediately.
- *   <li>If the user connects a display from TalkBack's settings, TalkBack reclaims it.
- * </ul>
+ * for the protocol, and {@link BrailleDisplayLeasePolicy} for the rules of when an app may hold the
+ * display. This class connects those rules to Android: the apps' messengers and death links,
+ * timers, the foreground app, the display's Bluetooth link and speech.
  *
  * <p><b>Open lending</b>, for clients that can't use the access service, such as web apps using
  * Web Bluetooth: {@link #lendToForegroundApp} releases the display so whatever the user connects
  * next can use it. It starts when the user activates a button marked with {@link
- * #CONNECT_BUTTON_ROLE_DESCRIPTION}, or with the lend command. With no client to ask, TalkBack
- * takes the display back when the display's Bluetooth connection ends, or if nothing connects
- * within {@link #OPEN_LEND_CONNECT_TIMEOUT_MS}, or if the user leaves the app before anything
- * connects.
+ * #CONNECT_BUTTON_ROLE_DESCRIPTION}, or with the lend command. While waiting, TalkBack selects the
+ * display in the browser's device list.
  *
  * <p>All state is on the main thread.
  */
 public final class BrailleDisplayLeaseManager {
   private static final String TAG = "BrailleDisplayLease";
-  /** How long another app must stay in the foreground before access is revoked. */
-  static final long FOREGROUND_GRACE_MS = 1_000L;
-  /** How long a revoked app has to disconnect before TalkBack reconnects anyway. */
-  static final long RELEASE_TIMEOUT_MS = 2_000L;
-  /** Time for TalkBack's link to the display to drop before the app is told to connect. */
-  static final long LINK_RELEASE_DELAY_MS = 500L;
-  /** How long an open lend waits for something to connect before TalkBack takes the display back. */
-  static final long OPEN_LEND_CONNECT_TIMEOUT_MS = 60_000L;
   /** How long the tap on a web app's connect button lasts. */
   private static final long CONNECT_TAP_DURATION_MS = 50;
   /** Pause between lending the display and tapping a web app's connect button. */
@@ -113,64 +97,6 @@ public final class BrailleDisplayLeaseManager {
    */
   public static final String CONNECT_BUTTON_ROLE_DESCRIPTION = "braille display connect";
 
-  private enum State {
-    /** TalkBack owns the display (or has none). */
-    IDLE,
-    /** TalkBack is letting go of the display for an app. */
-    GRANTING,
-    /** An app holds the display. */
-    GRANTED,
-    /** TalkBack asked the app to give the display back. */
-    REVOKING,
-  }
-
-  /** An app's hold, or request for a hold, on the display. */
-  private final class Lease implements IBinder.DeathRecipient {
-    final int uid;
-    final String packageName;
-    final Messenger client;
-
-    Lease(int uid, String packageName, Messenger client) {
-      this.uid = uid;
-      this.packageName = packageName;
-      this.client = client;
-    }
-
-    @Override
-    public void binderDied() {
-      mainHandler.post(() -> onClientDied(this));
-    }
-
-    void link() {
-      try {
-        client.getBinder().linkToDeath(this, 0);
-      } catch (RemoteException e) {
-        // Already dead; binderDied will not be called, so handle it now.
-        mainHandler.post(() -> onClientDied(this));
-      }
-    }
-
-    void unlink() {
-      client.getBinder().unlinkToDeath(this, 0);
-    }
-
-    void send(int what, int arg1) {
-      send(what, arg1, null);
-    }
-
-    void send(int what, int arg1, @Nullable Bundle data) {
-      Message message = Message.obtain(null, what, arg1, 0);
-      if (data != null) {
-        message.setData(data);
-      }
-      try {
-        client.send(message);
-      } catch (RemoteException e) {
-        BrailleDisplayLog.w(TAG, "Could not reach " + packageName + ": " + e);
-      }
-    }
-  }
-
   @SuppressLint("StaticFieldLeak")
   private static BrailleDisplayLeaseManager instance;
 
@@ -184,30 +110,15 @@ public final class BrailleDisplayLeaseManager {
 
   private final Context context;
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
-  private final Runnable finishGrantRunnable = this::finishGrant;
-  private final Runnable foregroundGraceRunnable = this::onForegroundGraceElapsed;
-  private boolean graceScheduled;
-  private final Runnable releaseTimeoutRunnable = this::onReleaseTimeout;
+  private final BrailleDisplayLeasePolicy policy;
+  private final Map<BrailleDisplayLeasePolicy.Timer, Runnable> timers =
+      new EnumMap<>(BrailleDisplayLeasePolicy.Timer.class);
+  private final Map<BrailleDisplayLeasePolicy.Client, IBinder.DeathRecipient> deathLinks =
+      new HashMap<>();
 
   @Nullable private AccessibilityService accessibilityService;
-  private State state = State.IDLE;
-  @Nullable private Lease lease;
-  /** An app that asked for the display while another app was still giving it back. */
-  @Nullable private Lease pending;
-  /** True while TalkBack has given up the display, from the first grant until it reclaims it. */
-  private boolean displaySuspended;
   /** The display TalkBack released, to reconnect when the lease ends; may be null. */
   @Nullable private ConnectableDevice releasedDevice;
-
-  // Open lending (no client): all main thread.
-  private final Runnable openLendTimeoutRunnable = this::onOpenLendTimeout;
-  private final Runnable openLendForegroundRunnable = this::onOpenLendForegroundElapsed;
-  /** True while the display is lent openly, to whatever connects next. */
-  private boolean openLend;
-  /** The app in the foreground when the display was lent openly, such as the browser. */
-  @Nullable private String openLendPackage;
-  /** True once something has connected to the display during an open lend. */
-  private boolean openLendConnected;
   @Nullable private BroadcastReceiver aclReceiver;
   /** Whether the display has been selected in the browser's device list during this open lend. */
   private boolean chooserDeviceSelected;
@@ -216,6 +127,10 @@ public final class BrailleDisplayLeaseManager {
 
   private BrailleDisplayLeaseManager(Context context) {
     this.context = context;
+    this.policy = new BrailleDisplayLeasePolicy(new AndroidHost());
+    for (BrailleDisplayLeasePolicy.Timer timer : BrailleDisplayLeasePolicy.Timer.values()) {
+      timers.put(timer, () -> policy.onTimer(timer));
+    }
   }
 
   /** TalkBack's accessibility service started; it is used to find the foreground app. */
@@ -228,26 +143,13 @@ public final class BrailleDisplayLeaseManager {
    * reclaim it into.
    */
   public void onServiceStopped() {
-    stopOpenLend();
+    policy.onServiceStopped();
     accessibilityService = null;
-    if (lease != null) {
-      lease.unlink();
-      lease = null;
-    }
-    if (pending != null) {
-      pending.unlink();
-      pending = null;
-    }
-    mainHandler.removeCallbacksAndMessages(null);
-    graceScheduled = false;
-    state = State.IDLE;
-    displaySuspended = false;
-    releasedDevice = null;
   }
 
   /** True while an app holds, or is being given, the display. */
   public boolean isDisplayLent() {
-    return displaySuspended;
+    return policy.isDisplaySuspended();
   }
 
   // ---- Requests from apps ----
@@ -256,38 +158,7 @@ public final class BrailleDisplayLeaseManager {
     if (replyTo == null) {
       return;
     }
-    String packageName = packageForUid(uid);
-    Lease request = new Lease(uid, packageName, replyTo);
-    if (!isForegroundUid(uid)) {
-      BrailleDisplayLog.w(TAG, packageName + " asked for the display but is not in the foreground");
-      request.send(
-          BrailleDisplayAccessContract.MSG_ACCESS_DENIED,
-          BrailleDisplayAccessContract.DENIED_NOT_FOREGROUND);
-      return;
-    }
-    BrailleDisplayLog.d(TAG, packageName + " requests the display; state " + state);
-    if (lease != null && lease.uid == uid && state != State.REVOKING) {
-      // Repeated request from the current holder.
-      if (state == State.GRANTED) {
-        request.send(
-            BrailleDisplayAccessContract.MSG_ACCESS_GRANTED, grantedArg(), describeForApp(releasedDevice));
-      }
-      cancelGrace();
-      return;
-    }
-    if (lease == null) {
-      grant(request);
-      return;
-    }
-    // Another app holds the display, or the holder is giving it back: queue this request and make
-    // sure the holder is being asked to release. The requester is in the foreground, so there is
-    // no grace period.
-    if (pending != null) {
-      pending.unlink();
-    }
-    pending = request;
-    request.link();
-    revoke();
+    policy.onRequestAccess(new BrailleDisplayLeasePolicy.Client(uid, packageForUid(uid), replyTo));
   }
 
   /** Tells a foreground app which display TalkBack is using or has lent, without lending it. */
@@ -295,16 +166,18 @@ public final class BrailleDisplayLeaseManager {
     if (replyTo == null) {
       return;
     }
-    Lease asker = new Lease(uid, packageForUid(uid), replyTo);
-    if (!isForegroundUid(uid)) {
-      asker.send(
+    if (!policy.isForeground(uid)) {
+      send(
+          replyTo,
+          packageForUid(uid),
           BrailleDisplayAccessContract.MSG_ACCESS_DENIED,
-          BrailleDisplayAccessContract.DENIED_NOT_FOREGROUND);
+          BrailleDisplayAccessContract.DENIED_NOT_FOREGROUND,
+          null);
       return;
     }
     ConnectableDevice device = null;
     boolean connectedToTalkBack = false;
-    if (displaySuspended) {
+    if (policy.isDisplaySuspended()) {
       device = releasedDevice;
     } else if (accessibilityService != null) {
       Connectioneer connectioneer = Connectioneer.getInstance(context);
@@ -315,7 +188,12 @@ public final class BrailleDisplayLeaseManager {
     if (data != null) {
       data.putBoolean(BrailleDisplayAccessContract.KEY_CONNECTED_TO_TALKBACK, connectedToTalkBack);
     }
-    asker.send(BrailleDisplayAccessContract.MSG_DISPLAY_INFO, data != null ? 1 : 0, data);
+    send(
+        replyTo,
+        packageForUid(uid),
+        BrailleDisplayAccessContract.MSG_DISPLAY_INFO,
+        data != null ? 1 : 0,
+        data);
   }
 
   /**
@@ -369,134 +247,7 @@ public final class BrailleDisplayLeaseManager {
   }
 
   void onReleaseAccess(int uid) {
-    if (pending != null && pending.uid == uid) {
-      pending.unlink();
-      pending = null;
-    }
-    if (lease == null || lease.uid != uid) {
-      return;
-    }
-    BrailleDisplayLog.d(TAG, lease.packageName + " released the display");
-    endLease();
-  }
-
-  // ---- State transitions ----
-
-  private void grant(Lease request) {
-    // An app asking through the access service takes over an open lend; the display is already
-    // released.
-    stopOpenLend();
-    lease = request;
-    if (pending == request) {
-      pending = null;
-    } else {
-      request.link();
-    }
-    state = State.GRANTING;
-    cancelGrace();
-    long delay = 0;
-    // Without TalkBack's service running there is no TalkBack connection to release.
-    if (!displaySuspended && accessibilityService != null) {
-      displaySuspended = true;
-      releasedDevice = Connectioneer.getInstance(context).releaseDisplayForExternalApp().orElse(null);
-      if (releasedDevice != null) {
-        delay = LINK_RELEASE_DELAY_MS;
-      }
-    }
-    announce(context.getString(R.string.bd_access_lent, appLabel(request.packageName)));
-    mainHandler.postDelayed(finishGrantRunnable, delay);
-  }
-
-  private void finishGrant() {
-    if (lease == null || state != State.GRANTING) {
-      return;
-    }
-    state = State.GRANTED;
-    BrailleDisplayLog.d(TAG, "Display lent to " + lease.packageName);
-    lease.send(
-        BrailleDisplayAccessContract.MSG_ACCESS_GRANTED, grantedArg(), describeForApp(releasedDevice));
-    // The app may have left the foreground while TalkBack was letting go.
-    onForegroundMaybeChanged();
-  }
-
-  private int grantedArg() {
-    return releasedDevice != null
-        ? BrailleDisplayAccessContract.GRANTED_DISPLAY_RELEASED
-        : BrailleDisplayAccessContract.GRANTED_NO_DISPLAY;
-  }
-
-  /** Asks the holder to give the display back, and reclaims it after a timeout. */
-  private void revoke() {
-    if (lease == null || state == State.REVOKING) {
-      return;
-    }
-    cancelGrace();
-    mainHandler.removeCallbacks(finishGrantRunnable);
-    boolean wasGranted = state == State.GRANTED;
-    state = State.REVOKING;
-    BrailleDisplayLog.d(TAG, "Revoking the display from " + lease.packageName);
-    if (wasGranted) {
-      lease.send(BrailleDisplayAccessContract.MSG_ACCESS_REVOKED, 0);
-      mainHandler.postDelayed(releaseTimeoutRunnable, RELEASE_TIMEOUT_MS);
-    } else {
-      // Never told it was granted, so it has not connected: end at once.
-      endLease();
-    }
-  }
-
-  private void onReleaseTimeout() {
-    if (lease != null) {
-      BrailleDisplayLog.w(TAG, lease.packageName + " did not release the display in time");
-    }
-    endLease();
-  }
-
-  private void onClientDied(Lease died) {
-    if (pending == died) {
-      pending = null;
-    }
-    if (lease == died) {
-      BrailleDisplayLog.w(TAG, died.packageName + " died while holding the display");
-      endLease();
-    }
-  }
-
-  /** The current lease is over: hand the display to a waiting app, or back to TalkBack. */
-  private void endLease() {
-    mainHandler.removeCallbacks(finishGrantRunnable);
-    cancelGrace();
-    mainHandler.removeCallbacks(releaseTimeoutRunnable);
-    if (lease != null) {
-      lease.unlink();
-      lease = null;
-    }
-    state = State.IDLE;
-    Lease next = pending;
-    if (next != null && isForegroundUid(next.uid)) {
-      // Pass the display straight to the waiting app without reconnecting TalkBack in between.
-      grant(next);
-      return;
-    }
-    if (next != null) {
-      next.send(
-          BrailleDisplayAccessContract.MSG_ACCESS_DENIED,
-          BrailleDisplayAccessContract.DENIED_NOT_FOREGROUND);
-      next.unlink();
-      pending = null;
-    }
-    reclaim();
-  }
-
-  private void reclaim() {
-    if (!displaySuspended) {
-      return;
-    }
-    displaySuspended = false;
-    ConnectableDevice device = releasedDevice;
-    releasedDevice = null;
-    BrailleDisplayLog.d(TAG, "Reclaiming the display for TalkBack");
-    announce(context.getString(R.string.bd_access_returned));
-    Connectioneer.getInstance(context).reclaimDisplayFromExternalApp(device);
+    policy.onReleaseAccess(uid);
   }
 
   /**
@@ -504,28 +255,8 @@ public final class BrailleDisplayLeaseManager {
    * caller connects the display itself.
    */
   public void onUserReclaimedDisplay() {
-    if (!displaySuspended) {
-      return;
-    }
-    BrailleDisplayLog.d(TAG, "User reclaimed the display");
-    stopOpenLend();
-    mainHandler.removeCallbacksAndMessages(null);
-    graceScheduled = false;
-    if (lease != null) {
-      lease.send(BrailleDisplayAccessContract.MSG_ACCESS_REVOKED, 0);
-      lease.unlink();
-      lease = null;
-    }
-    if (pending != null) {
-      pending.unlink();
-      pending = null;
-    }
-    state = State.IDLE;
-    displaySuspended = false;
-    releasedDevice = null;
-    announce(context.getString(R.string.bd_access_returned));
+    policy.onUserReclaimedDisplay();
   }
-
   // ---- Open lending ----
 
   /** Returns whether {@code node} is a web app's button marked for connecting a braille display. */
@@ -606,77 +337,13 @@ public final class BrailleDisplayLeaseManager {
    * already lent.
    */
   public boolean lendToForegroundApp() {
-    if (displaySuspended || lease != null || accessibilityService == null) {
+    if (!policy.lendOpenly()) {
       return false;
     }
-    Connectioneer connectioneer = Connectioneer.getInstance(context);
-    if (connectioneer.getConnectingOrConnectedDevice().isEmpty()) {
-      return false;
-    }
-    displaySuspended = true;
-    releasedDevice = connectioneer.releaseDisplayForExternalApp().orElse(null);
-    openLend = true;
-    openLendPackage = foregroundPackage();
-    openLendConnected = false;
     chooserDeviceSelected = false;
     chooserPairFocused = false;
-    BrailleDisplayLog.d(TAG, "Display lent openly while " + openLendPackage + " is in front");
-    registerAclReceiver();
-    mainHandler.postDelayed(openLendTimeoutRunnable, OPEN_LEND_CONNECT_TIMEOUT_MS);
-    announce(context.getString(R.string.bd_access_lent_open));
     return true;
   }
-
-  /** Ends an open lend and reconnects TalkBack. */
-  private void endOpenLend() {
-    if (!openLend) {
-      return;
-    }
-    stopOpenLend();
-    reclaim();
-  }
-
-  /** Clears the open lend state, without reconnecting. */
-  private void stopOpenLend() {
-    mainHandler.removeCallbacks(openLendTimeoutRunnable);
-    mainHandler.removeCallbacks(openLendForegroundRunnable);
-    unregisterAclReceiver();
-    openLend = false;
-    openLendPackage = null;
-    openLendConnected = false;
-    chooserDeviceSelected = false;
-    chooserPairFocused = false;
-  }
-
-  private void onOpenLendTimeout() {
-    if (openLend && !openLendConnected) {
-      BrailleDisplayLog.d(TAG, "Nothing connected to the lent display; taking it back");
-      endOpenLend();
-    }
-  }
-
-  private void onOpenLendForegroundMaybeChanged() {
-    if (!openLend || openLendConnected || isScreenLocked()) {
-      return;
-    }
-    String foreground = foregroundPackage();
-    if (foreground != null && !foreground.equals(openLendPackage)) {
-      mainHandler.removeCallbacks(openLendForegroundRunnable);
-      mainHandler.postDelayed(openLendForegroundRunnable, FOREGROUND_GRACE_MS);
-    }
-  }
-
-  private void onOpenLendForegroundElapsed() {
-    String foreground = foregroundPackage();
-    if (openLend
-        && !openLendConnected
-        && foreground != null
-        && !foreground.equals(openLendPackage)) {
-      BrailleDisplayLog.d(TAG, "Left " + openLendPackage + " before anything connected");
-      endOpenLend();
-    }
-  }
-
   /**
    * If the browser's device list is showing, selects the lent display in it and moves focus to the
    * list's pair button, so the user only has to activate it. Chrome's list doesn't expose device
@@ -686,6 +353,7 @@ public final class BrailleDisplayLeaseManager {
    */
   private void selectInDeviceChooser() {
     AccessibilityService service = accessibilityService;
+    String openLendPackage = policy.getOpenLendPackage();
     if (service == null || openLendPackage == null || chooserPairFocused) {
       return;
     }
@@ -813,7 +481,8 @@ public final class BrailleDisplayLeaseManager {
             if (changed == null || !address.equalsIgnoreCase(changed.getAddress())) {
               return;
             }
-            onAclChanged(BluetoothDevice.ACTION_ACL_CONNECTED.equals(intent.getAction()));
+            policy.onDisplayLinkChanged(
+                BluetoothDevice.ACTION_ACL_CONNECTED.equals(intent.getAction()));
           }
         };
     IntentFilter filter = new IntentFilter();
@@ -830,96 +499,32 @@ public final class BrailleDisplayLeaseManager {
     }
   }
 
-  private void onAclChanged(boolean connected) {
-    if (!openLend) {
-      return;
-    }
-    if (connected) {
-      BrailleDisplayLog.d(TAG, "Something connected to the lent display");
-      openLendConnected = true;
-      mainHandler.removeCallbacks(openLendTimeoutRunnable);
-      mainHandler.removeCallbacks(openLendForegroundRunnable);
-    } else if (openLendConnected) {
-      // TalkBack's own disconnect, just after lending, comes before anything connects, so only a
-      // disconnect after a connection ends the lend.
-      BrailleDisplayLog.d(TAG, "The lent display disconnected; taking it back");
-      endOpenLend();
-    }
-  }
-
   // ---- Foreground tracking ----
 
   /**
    * Feeds accessibility events in: to lend the display when a marked connect button is activated,
-   * and to notice when the holder leaves the foreground.
+   * to select the display in a browser's device list, and to notice when the app holding the
+   * display leaves the foreground.
    */
   public void onAccessibilityEvent(AccessibilityEvent event) {
     int type = event.getEventType();
     if (type == AccessibilityEvent.TYPE_VIEW_CLICKED
-        && !displaySuspended
+        && !policy.isDisplaySuspended()
         && isConnectButton(AccessibilityNodeInfoUtils.toCompat(event.getSource()))) {
       BrailleDisplayLog.d(TAG, "Connect button activated; lending the display");
       lendToForegroundApp();
       return;
     }
-    if (openLend
-        && (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-            || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED)) {
-      onOpenLendForegroundMaybeChanged();
+    if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+      policy.onWindowsChanged();
     }
-    if (openLend
-        && !openLendConnected
+    if (policy.isOpenLendWaiting()
         && (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
             || type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)) {
       selectInDeviceChooser();
     }
-    if (lease == null) {
-      return;
-    }
-    if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-        || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
-      onForegroundMaybeChanged();
-    }
   }
-
-  private void onForegroundMaybeChanged() {
-    if (lease == null || state == State.REVOKING) {
-      return;
-    }
-    if (isScreenLocked()) {
-      // An app keeps the display while the phone is locked.
-      cancelGrace();
-      return;
-    }
-    String foreground = foregroundPackage();
-    if (foreground == null) {
-      return;
-    }
-    if (packageBelongsToUid(foreground, lease.uid)) {
-      cancelGrace();
-    } else if (!graceScheduled) {
-      graceScheduled = true;
-      mainHandler.postDelayed(foregroundGraceRunnable, FOREGROUND_GRACE_MS);
-    }
-  }
-
-  private void cancelGrace() {
-    graceScheduled = false;
-    mainHandler.removeCallbacks(foregroundGraceRunnable);
-  }
-
-  private void onForegroundGraceElapsed() {
-    graceScheduled = false;
-    if (lease == null || isScreenLocked()) {
-      return;
-    }
-    String foreground = foregroundPackage();
-    if (foreground != null && !packageBelongsToUid(foreground, lease.uid)) {
-      BrailleDisplayLog.d(TAG, foreground + " is in the foreground; revoking");
-      revoke();
-    }
-  }
-
   /** The package of the focused application window, or null if it can't be determined. */
   @Nullable
   private String foregroundPackage() {
@@ -946,15 +551,6 @@ public final class BrailleDisplayLeaseManager {
       }
     }
     return fallback;
-  }
-
-  private boolean isForegroundUid(int uid) {
-    if (accessibilityService == null) {
-      // TalkBack isn't running, so there is nothing to protect; allow.
-      return true;
-    }
-    String foreground = foregroundPackage();
-    return foreground == null || packageBelongsToUid(foreground, uid);
   }
 
   private boolean packageBelongsToUid(String packageName, int uid) {
@@ -990,5 +586,168 @@ public final class BrailleDisplayLeaseManager {
       return;
     }
     BrailleCommonTalkBackSpeaker.getInstance().speak(text, AnnounceType.INTERRUPT);
+  }
+
+  private static void send(
+      Messenger messenger, String packageName, int what, int arg1, @Nullable Bundle data) {
+    Message message = Message.obtain(null, what, arg1, 0);
+    if (data != null) {
+      message.setData(data);
+    }
+    try {
+      messenger.send(message);
+    } catch (RemoteException e) {
+      BrailleDisplayLog.w(TAG, "Could not reach " + packageName + ": " + e);
+    }
+  }
+
+  private static void send(BrailleDisplayLeasePolicy.Client client, int what, int arg1) {
+    send(client, what, arg1, null);
+  }
+
+  private static void send(
+      BrailleDisplayLeasePolicy.Client client, int what, int arg1, @Nullable Bundle data) {
+    send((Messenger) client.channel, client.packageName, what, arg1, data);
+  }
+
+  /** Carries out {@link BrailleDisplayLeasePolicy}'s decisions on Android. */
+  private final class AndroidHost implements BrailleDisplayLeasePolicy.Host {
+    @Override
+    public void schedule(BrailleDisplayLeasePolicy.Timer timer, long delayMs) {
+      Runnable runnable = timers.get(timer);
+      mainHandler.removeCallbacks(runnable);
+      mainHandler.postDelayed(runnable, delayMs);
+    }
+
+    @Override
+    public void cancel(BrailleDisplayLeasePolicy.Timer timer) {
+      mainHandler.removeCallbacks(timers.get(timer));
+    }
+
+    @Override
+    public void cancelAllTimers() {
+      for (Runnable runnable : timers.values()) {
+        mainHandler.removeCallbacks(runnable);
+      }
+    }
+
+    @Override
+    public void link(BrailleDisplayLeasePolicy.Client client) {
+      if (deathLinks.containsKey(client)) {
+        return;
+      }
+      IBinder.DeathRecipient recipient =
+          () -> mainHandler.post(() -> policy.onClientDied(client));
+      deathLinks.put(client, recipient);
+      try {
+        ((Messenger) client.channel).getBinder().linkToDeath(recipient, 0);
+      } catch (RemoteException e) {
+        // Already dead; binderDied will not be called, so handle it now.
+        mainHandler.post(() -> policy.onClientDied(client));
+      }
+    }
+
+    @Override
+    public void unlink(BrailleDisplayLeasePolicy.Client client) {
+      IBinder.DeathRecipient recipient = deathLinks.remove(client);
+      if (recipient != null) {
+        ((Messenger) client.channel).getBinder().unlinkToDeath(recipient, 0);
+      }
+    }
+
+    @Override
+    public void sendGranted(BrailleDisplayLeasePolicy.Client client, boolean displayReleased) {
+      send(
+          client,
+          BrailleDisplayAccessContract.MSG_ACCESS_GRANTED,
+          displayReleased
+              ? BrailleDisplayAccessContract.GRANTED_DISPLAY_RELEASED
+              : BrailleDisplayAccessContract.GRANTED_NO_DISPLAY,
+          describeForApp(releasedDevice));
+    }
+
+    @Override
+    public void sendRevoked(BrailleDisplayLeasePolicy.Client client) {
+      send(client, BrailleDisplayAccessContract.MSG_ACCESS_REVOKED, 0);
+    }
+
+    @Override
+    public void sendDenied(BrailleDisplayLeasePolicy.Client client, int reason) {
+      send(client, BrailleDisplayAccessContract.MSG_ACCESS_DENIED, reason);
+    }
+
+    @Override
+    public boolean isServiceRunning() {
+      return accessibilityService != null;
+    }
+
+    @Override
+    public boolean hasDisplay() {
+      return Connectioneer.getInstance(context).getConnectingOrConnectedDevice().isPresent();
+    }
+
+    @Override
+    public boolean releaseDisplay() {
+      releasedDevice = Connectioneer.getInstance(context).releaseDisplayForExternalApp().orElse(null);
+      return releasedDevice != null;
+    }
+
+    @Override
+    public void reclaimDisplay() {
+      ConnectableDevice device = releasedDevice;
+      releasedDevice = null;
+      Connectioneer.getInstance(context).reclaimDisplayFromExternalApp(device);
+    }
+
+    @Override
+    public void forgetReleasedDisplay() {
+      releasedDevice = null;
+    }
+
+    @Override
+    @Nullable
+    public String foregroundPackage() {
+      return BrailleDisplayLeaseManager.this.foregroundPackage();
+    }
+
+    @Override
+    public boolean packageBelongsToUid(String packageName, int uid) {
+      return BrailleDisplayLeaseManager.this.packageBelongsToUid(packageName, uid);
+    }
+
+    @Override
+    public boolean isScreenLocked() {
+      return BrailleDisplayLeaseManager.this.isScreenLocked();
+    }
+
+    @Override
+    public void startWatchingDisplayLink() {
+      registerAclReceiver();
+    }
+
+    @Override
+    public void stopWatchingDisplayLink() {
+      unregisterAclReceiver();
+    }
+
+    @Override
+    public void announceLent(String packageName) {
+      announce(context.getString(R.string.bd_access_lent, appLabel(packageName)));
+    }
+
+    @Override
+    public void announceLentOpenly() {
+      announce(context.getString(R.string.bd_access_lent_open));
+    }
+
+    @Override
+    public void announceReturned() {
+      announce(context.getString(R.string.bd_access_returned));
+    }
+
+    @Override
+    public void log(String message) {
+      BrailleDisplayLog.d(TAG, message);
+    }
   }
 }
